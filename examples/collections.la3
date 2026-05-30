@@ -1,0 +1,30 @@
+// Lists, closures, higher-order methods, maps, and sets.
+
+fn main() {
+    let nums = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+    let evens   = nums.filter(|x| x % 2 == 0)
+    let squares = evens.map(|x| x * x)
+    let total   = squares.reduce(0, |acc, x| acc + x)
+
+    io.println(f"evens   = {evens}")
+    io.println(f"squares = {squares}")
+    io.println(f"sum     = {total}")
+
+    // Word frequency with a Map.
+    let text = "the cat sat on the mat the cat ran"
+    let mut counts: Map<str, i64> = {}
+    for word in text.split(" ") {
+        counts[word] = counts.get(word).unwrap_or(0) + 1
+    }
+    for (word, n) in counts {
+        io.println(f"{word:>6}: {n}")
+    }
+
+    // A Set of unique first letters.
+    let mut seen: Set<str> = {}
+    for word in text.split(" ") {
+        seen.insert(word.chars().first().unwrap())
+    }
+    io.println(f"distinct first letters: {seen.len()}")
+}

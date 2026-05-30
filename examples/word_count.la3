@@ -1,0 +1,30 @@
+// Word frequency over a file: read, tokenize, count into a Map, then sort the
+// entries by count (descending) with a closure comparator.
+
+fn main() -> Result<()> {
+    let text = fs.read("examples/data/poem.txt")?
+
+    let mut counts: Map<str, i64> = {}
+    for line in text.split("\n") {
+        for word in line.trim().split(" ") {
+            if !word.is_empty() {
+                counts[word] = counts.get(word).unwrap_or(0) + 1
+            }
+        }
+    }
+
+    // Build (word, count) pairs and sort by count, highest first.
+    let mut pairs: List<(str, i64)> = []
+    for (word, n) in counts {
+        pairs.push((word, n))
+    }
+    let ranked = pairs.sort_by(|a, b| a.1 > b.1)
+
+    io.println("most frequent words:")
+    for (word, n) in ranked {
+        if n > 1 {
+            io.println(f"{word:>12} {n}")
+        }
+    }
+    Ok(())
+}

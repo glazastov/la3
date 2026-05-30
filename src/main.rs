@@ -1,0 +1,94 @@
+//! La3: a lexer, parser, checker, and tree-walking interpreter for Laila Lang.
+//!
+//! Usage:
+//!   la3 run   <file.la3>   parse, check, and execute (calls `main`)
+//!   la3 check <file.la3>   parse and report undefined-name errors
+//!   la3 ast   <file.la3>   parse and print the AST
+//!   la3 tokens <file.la3>  print the token stream (debugging)
+
+mod ast;
+mod checker;
+mod diag;
+mod interp;
+mod lexer;
+mod parser;
+
+use std::process::exit;
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() < 3 {
+        eprintln!("usage: la3 <run|check|ast|tokens> <file.la3>");
+        exit(2);
+    }
+    let cmd = args[1].as_str();
+    let path = &args[2];
+    let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("la3: cannot read {}: {}", path, e);
+        exit(2);
+    });
+
+    match cmd {
+        "tokens" => match lexer::Lexer::new(&src).tokenize() {
+            Ok(toks) => {
+                for t in toks {
+                    println!("{:>4}:{:<3} {:?}", t.pos.line, t.pos.col, t.tok);
+                }
+            }
+            Err(d) => fail(&d, path, &src),
+        },
+        "ast" => match parser::parse(&src) {
+            Ok(prog) => println!("{:#?}", prog),
+            Err(d) => fail(&d, path, &src),
+        },
+        "check" => {
+            let prog = match parser::parse(&src) {
+                Ok(p) => p,
+                Err(d) => fail(&d, path, &src),
+            };
+            let errs = checker::check(&prog);
+            if errs.is_empty() {
+                println!("ok: no errors in {}", path);
+            } else {
+                for d in &errs {
+                    eprintln!("{}\n", d.render(path, &src));
+                }
+                eprintln!("{} error(s)", errs.len());
+                exit(1);
+            }
+        }
+        "run" => {
+            let prog = match parser::parse(&src) {
+                Ok(p) => p,
+                Err(d) => fail(&d, path, &src),
+            };
+            let errs = checker::check(&prog);
+            if !errs.is_empty() {
+                for d in &errs {
+                    eprintln!("{}\n", d.render(path, &src));
+                }
+                exit(1);
+            }
+            let mut interp = interp::Interp::new();
+            // Arguments after the file path are exposed via `os.args()`. A lone
+            // `--` separator (e.g. `la3 run f.la3 -- a b`) is dropped.
+            let mut prog_args = &args[3..];
+            if prog_args.first().map(|s| s.as_str()) == Some("--") {
+                prog_args = &prog_args[1..];
+            }
+            interp.set_args(prog_args.to_vec());
+            if let Err(d) = interp.run(&prog) {
+                fail(&d, path, &src);
+            }
+        }
+        other => {
+            eprintln!("la3: unknown command '{}'", other);
+            exit(2);
+        }
+    }
+}
+
+fn fail(d: &diag::Diagnostic, path: &str, src: &str) -> ! {
+    eprintln!("{}", d.render(path, src));
+    exit(1);
+}

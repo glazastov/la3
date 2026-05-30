@@ -1,0 +1,40 @@
+// A tiny HTTP router. The interpreter has no real sockets, so this models the
+// request/response cycle with plain data: a list of incoming requests is routed
+// to handlers that build responses. It shows enums, structs, maps, and match.
+
+enum Method { Get, Post }
+
+struct Request {
+    method: Method,
+    path: str,
+    body: str,
+}
+
+struct Response {
+    status: u16,
+    body: str,
+}
+
+fn route(req: Request) -> Response {
+    match (req.method, req.path) {
+        (Method.Get, "/")        => Response { status: 200, body: "welcome to La3" },
+        (Method.Get, "/health")  => Response { status: 200, body: "ok" },
+        (Method.Post, "/echo")   => Response { status: 201, body: req.body },
+        (Method.Get, _)          => Response { status: 404, body: f"no route for {req.path}" },
+        _                        => Response { status: 405, body: "method not allowed" },
+    }
+}
+
+fn main() {
+    let inbox = [
+        Request { method: Method.Get,  path: "/",       body: "" },
+        Request { method: Method.Get,  path: "/health", body: "" },
+        Request { method: Method.Post, path: "/echo",   body: "hello" },
+        Request { method: Method.Get,  path: "/missing", body: "" },
+    ]
+
+    for req in inbox {
+        let resp = route(req)
+        io.println(f"{resp.status} {req.path} -> {resp.body}")
+    }
+}

@@ -1,0 +1,27 @@
+// Loops, match on a tuple, and the `loop { break value }` form.
+
+fn classify(n: i64) -> str {
+    match (n % 3, n % 5) {
+        (0, 0) => "FizzBuzz",
+        (0, _) => "Fizz",
+        (_, 0) => "Buzz",
+        _      => str(n),
+    }
+}
+
+fn main() {
+    for n in 1..=20 {
+        io.println(classify(n))
+    }
+
+    // loop as an expression: count up until a condition, yielding a value.
+    let mut i = 0
+    let first_over_100 = loop {
+        i += 1
+        let sq = i * i
+        if sq > 100 {
+            break sq
+        }
+    }
+    io.println(f"first square over 100 = {first_over_100}")
+}

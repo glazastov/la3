@@ -1,0 +1,35 @@
+// Option, Result, the `?` operator, and the optional operators ?? and ?.
+
+fn parse_port(s: str) -> Result<u16> {
+    match s.parse::<i64>() {
+        Ok(n) if n >= 1 && n <= 65535 => Ok(n as u16),
+        Ok(_)                          => Err("port out of range"),
+        Err(_)                         => Err(f"not a number: {s}"),
+    }
+}
+
+fn first_even(xs: List<i64>) -> Option<i64> {
+    for x in xs {
+        if x % 2 == 0 {
+            return Some(x)
+        }
+    }
+    None
+}
+
+fn main() {
+    for s in ["443", "70000", "https"] {
+        match parse_port(s) {
+            Ok(p)  => io.println(f"ok: {p}"),
+            Err(e) => io.println(f"error: {e}"),
+        }
+    }
+
+    let found = first_even([1, 3, 5, 8, 9])
+    io.println(f"first even: {found.unwrap_or(-1)}")
+
+    // ?? supplies a default for a bare optional (nil)
+    let opt_name = nil
+    let name = opt_name ?? "anonymous"
+    io.println(f"name = {name}")
+}

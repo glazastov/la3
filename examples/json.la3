@@ -1,0 +1,25 @@
+// Encoding and decoding JSON with the json stdlib namespace.
+
+struct Server {
+    host: str,
+    port: u16,
+    tls: bool,
+}
+
+fn main() -> Result<()> {
+    let cfg = Server { host: "glazastov.com", port: 443, tls: true }
+
+    // Encode a struct to pretty JSON.
+    let text = json.pretty(cfg)?
+    io.println("encoded:")
+    io.println(text)
+
+    // Decode JSON text back into a Map and read fields out of it.
+    let raw = "{ \"name\": \"laila\", \"version\": 3, \"stable\": true, \"tags\": [\"rust\", \"lua\"] }"
+    let doc = json.decode(raw)?
+    io.println(f"name    = {doc[\"name\"]}")
+    io.println(f"version = {doc[\"version\"]}")
+    io.println(f"tags    = {doc[\"tags\"]}")
+
+    Ok(())
+}

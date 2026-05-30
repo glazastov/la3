@@ -1,0 +1,56 @@
+// The complete TLS-record example from the La3 reference, adapted to the
+// interpreter (floor division `//` is the `idiv` builtin, growable buffers are
+// `List<u8>`, and length is `.len()`).
+
+const TLS_RECORD_HEADER_LEN: usize = 5
+
+struct TlsRecord {
+    content_type: u8,    // 22 = Handshake, 23 = AppData
+    version_major: u8,
+    version_minor: u8,
+    payload: List<u8>,
+}
+
+impl TlsRecord {
+    fn encode(self) -> List<u8> {
+        let length = self.payload.len() as u16
+        let mut out: List<u8> = []
+        out.push(self.content_type)
+        out.push(self.version_major)
+        out.push(self.version_minor)
+        out.push((length >> 8) as u8)
+        out.push((length & 0xFF) as u8)
+        out.extend(self.payload)
+        out
+    }
+
+    fn decode(raw: List<u8>) -> Result<TlsRecord> {
+        if raw.len() < TLS_RECORD_HEADER_LEN {
+            return Err(f"too short: got {raw.len()} bytes")
+        }
+        let length = ((raw[3] as u16) << 8) | (raw[4] as u16)
+        Ok(TlsRecord {
+            content_type:  raw[0],
+            version_major: raw[1],
+            version_minor: raw[2],
+            payload:       raw[TLS_RECORD_HEADER_LEN..TLS_RECORD_HEADER_LEN + length as usize],
+        })
+    }
+}
+
+fn main() -> Result<()> {
+    let record = TlsRecord {
+        content_type:  22,
+        version_major: 3,
+        version_minor: 3,
+        payload:       [0x01, 0x00, 0x00, 0x04, 0xDE, 0xAD, 0xBE, 0xEF],
+    }
+
+    let encoded = record.encode()
+    io.println(f"encoded: {to_hex(encoded)}")
+
+    let decoded = TlsRecord.decode(encoded)?
+    io.println(f"content_type: {decoded.content_type}")
+    io.println(f"payload: {to_hex(decoded.payload)}")
+    Ok(())
+}

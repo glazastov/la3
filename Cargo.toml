@@ -1,0 +1,16 @@
+[package]
+name = "la3"
+version = "0.1.0"
+edition = "2021"
+description = "Lexer, parser, checker, and tree-walking interpreter for Laila Lang (La3), a reading pseudo-language."
+license = "MIT"
+repository = "https://github.com/andreribas/la3"
+readme = "README.md"
+
+[[bin]]
+name = "la3"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true

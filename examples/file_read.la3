@@ -1,0 +1,19 @@
+// Reading a file with fs.read, which returns Result<str>, and handling the
+// error case with match instead of unwrapping.
+
+fn main() {
+    let path = "examples/data/poem.txt"
+    match fs.read(path) {
+        Ok(text) => {
+            let lines = text.trim().split("\n")
+            io.println(f"{path} has {lines.len()} lines:")
+            for (i, line) in lines.enumerate() {
+                io.println(f"{i + 1:>3} | {line}")
+            }
+        }
+        Err(e) => {
+            io.eprintln(f"could not read file: {e}")
+            os.exit(1)
+        }
+    }
+}
