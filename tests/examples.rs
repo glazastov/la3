@@ -44,7 +44,11 @@ fn check_reports_undefined_name() {
     std::fs::write(&file, "fn main() { io.println(missing_name) }").unwrap();
     let (_out, err, ok) = run(&["check", file.to_str().unwrap()]);
     assert!(!ok, "check should fail on an undefined name");
-    assert!(err.contains("undefined name 'missing_name'"), "got:\n{}", err);
+    assert!(
+        err.contains("undefined name 'missing_name'"),
+        "got:\n{}",
+        err
+    );
     let _ = std::fs::remove_file(&file);
 }
 

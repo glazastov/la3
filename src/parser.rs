@@ -27,6 +27,15 @@ fn parse_expr_str(src: &str, pos: Pos) -> Result<Expr> {
     Ok(e)
 }
 
+/// The interface name of a generic bound, e.g. `Encode` from `T: Encode`.
+/// Bounds are written as types; only the head name is kept for conformance.
+fn bound_name(t: &TypeExpr) -> String {
+    match t {
+        TypeExpr::Named { name, .. } => name.clone(),
+        _ => String::new(),
+    }
+}
+
 fn ends_expr(t: &Tok) -> bool {
     matches!(
         t,
@@ -199,7 +208,11 @@ struct Parser {
 
 impl Parser {
     fn new(toks: Vec<Token>) -> Self {
-        Parser { toks, i: 0, no_struct: false }
+        Parser {
+            toks,
+            i: 0,
+            no_struct: false,
+        }
     }
 
     fn peek(&self) -> &Tok {
@@ -339,18 +352,21 @@ impl Parser {
         Ok(Item::TypeAlias { name, ty })
     }
 
-    fn parse_generics(&mut self) -> Result<Vec<String>> {
+    /// Parse `<T, U: Bound + Bound>`, keeping each parameter's interface bounds.
+    fn parse_generics(&mut self) -> Result<Vec<(String, Vec<String>)>> {
         let mut g = Vec::new();
         if self.eat(&Tok::Lt) {
             while !self.at(&Tok::Gt) {
-                g.push(self.ident()?);
+                let name = self.ident()?;
+                let mut bounds = Vec::new();
                 // optional bound `: Bound + Bound`
                 if self.eat(&Tok::Colon) {
-                    self.parse_type()?;
+                    bounds.push(bound_name(&self.parse_type()?));
                     while self.eat(&Tok::Plus) {
-                        self.parse_type()?;
+                        bounds.push(bound_name(&self.parse_type()?));
                     }
                 }
+                g.push((name, bounds));
                 if !self.eat(&Tok::Comma) {
                     break;
                 }
@@ -358,6 +374,12 @@ impl Parser {
             self.expect(&Tok::Gt, "'>'")?;
         }
         Ok(g)
+    }
+
+    /// The plain generic-parameter names, dropping bounds. Used where only the
+    /// names matter (struct and enum declarations).
+    fn parse_generic_names(&mut self) -> Result<Vec<String>> {
+        Ok(self.parse_generics()?.into_iter().map(|(n, _)| n).collect())
     }
 
     fn parse_fn(&mut self) -> Result<FnDecl> {
@@ -378,7 +400,11 @@ impl Parser {
                 self.bump();
                 let _m = self.eat(&Tok::Mut);
                 if self.eat(&Tok::SelfKw) {
-                    params.push(Param { name: "self".into(), ty: None, is_self: true });
+                    params.push(Param {
+                        name: "self".into(),
+                        ty: None,
+                        is_self: true,
+                    });
                     if !self.eat(&Tok::Comma) {
                         break;
                     }
@@ -390,14 +416,22 @@ impl Parser {
             if self.at(&Tok::Mut) && matches!(self.peek_at(1), Tok::SelfKw) {
                 self.bump();
                 self.bump();
-                params.push(Param { name: "self".into(), ty: None, is_self: true });
+                params.push(Param {
+                    name: "self".into(),
+                    ty: None,
+                    is_self: true,
+                });
                 if !self.eat(&Tok::Comma) {
                     break;
                 }
                 continue;
             }
             if self.eat(&Tok::SelfKw) {
-                params.push(Param { name: "self".into(), ty: None, is_self: true });
+                params.push(Param {
+                    name: "self".into(),
+                    ty: None,
+                    is_self: true,
+                });
                 if !self.eat(&Tok::Comma) {
                     break;
                 }
@@ -411,7 +445,11 @@ impl Parser {
             } else {
                 None
             };
-            let p = Param { name, ty, is_self: false };
+            let p = Param {
+                name,
+                ty,
+                is_self: false,
+            };
             if is_variadic {
                 variadic = Some(p);
             } else {
@@ -428,14 +466,23 @@ impl Parser {
             None
         };
         let body = self.parse_block()?;
-        Ok(FnDecl { name, generics, params, variadic, ret, body, is_async, pos })
+        Ok(FnDecl {
+            name,
+            generics,
+            params,
+            variadic,
+            ret,
+            body,
+            is_async,
+            pos,
+        })
     }
 
     fn parse_struct(&mut self) -> Result<StructDecl> {
         let pos = self.pos();
         self.bump();
         let name = self.ident()?;
-        let generics = self.parse_generics()?;
+        let generics = self.parse_generic_names()?;
         let mut fields = Vec::new();
         self.expect(&Tok::LBrace, "'{'")?;
         self.skip_terminators();
@@ -448,14 +495,19 @@ impl Parser {
             self.skip_terminators();
         }
         self.expect(&Tok::RBrace, "'}'")?;
-        Ok(StructDecl { name, generics, fields, pos })
+        Ok(StructDecl {
+            name,
+            generics,
+            fields,
+            pos,
+        })
     }
 
     fn parse_enum(&mut self) -> Result<EnumDecl> {
         let pos = self.pos();
         self.bump();
         let name = self.ident()?;
-        let generics = self.parse_generics()?;
+        let generics = self.parse_generic_names()?;
         let mut variants = Vec::new();
         self.expect(&Tok::LBrace, "'{'")?;
         self.skip_terminators();
@@ -492,7 +544,12 @@ impl Parser {
             self.skip_terminators();
         }
         self.expect(&Tok::RBrace, "'}'")?;
-        Ok(EnumDecl { name, generics, variants, pos })
+        Ok(EnumDecl {
+            name,
+            generics,
+            variants,
+            pos,
+        })
     }
 
     fn parse_impl(&mut self) -> Result<ImplBlock> {
@@ -524,7 +581,12 @@ impl Parser {
             self.skip_terminators();
         }
         self.expect(&Tok::RBrace, "'}'")?;
-        Ok(ImplBlock { interface, ty, methods, pos })
+        Ok(ImplBlock {
+            interface,
+            ty,
+            methods,
+            pos,
+        })
     }
 
     fn parse_interface(&mut self) -> Result<InterfaceDecl> {
@@ -560,7 +622,12 @@ impl Parser {
             self.skip_terminators();
         }
         self.expect(&Tok::RBrace, "'}'")?;
-        Ok(InterfaceDecl { name, supers, methods, pos })
+        Ok(InterfaceDecl {
+            name,
+            supers,
+            methods,
+            pos,
+        })
     }
 
     fn parse_const(&mut self) -> Result<ConstDecl> {
@@ -574,7 +641,12 @@ impl Parser {
         };
         self.expect(&Tok::Eq, "'='")?;
         let value = self.parse_expr()?;
-        Ok(ConstDecl { name, ty, value, pos })
+        Ok(ConstDecl {
+            name,
+            ty,
+            value,
+            pos,
+        })
     }
 
     // ---- types ----
@@ -605,13 +677,19 @@ impl Parser {
                     return Ok(TypeExpr::Slice(Box::new(inner)));
                 }
                 let inner = self.parse_type_atom()?;
-                Ok(TypeExpr::Ref { mutable, inner: Box::new(inner) })
+                Ok(TypeExpr::Ref {
+                    mutable,
+                    inner: Box::new(inner),
+                })
             }
             Tok::Star => {
                 self.bump();
                 let mutable = self.eat(&Tok::Mut);
                 let inner = self.parse_type_atom()?;
-                Ok(TypeExpr::Ptr { mutable, inner: Box::new(inner) })
+                Ok(TypeExpr::Ptr {
+                    mutable,
+                    inner: Box::new(inner),
+                })
             }
             Tok::LBracket => {
                 self.bump();
@@ -625,7 +703,10 @@ impl Parser {
                     None
                 };
                 self.expect(&Tok::RBracket, "']'")?;
-                Ok(TypeExpr::Array { inner: Box::new(inner), size })
+                Ok(TypeExpr::Array {
+                    inner: Box::new(inner),
+                    size,
+                })
             }
             Tok::LParen => {
                 self.bump();
@@ -670,15 +751,24 @@ impl Parser {
                 } else {
                     TypeExpr::Unit
                 };
-                Ok(TypeExpr::Fn { params, ret: Box::new(ret) })
+                Ok(TypeExpr::Fn {
+                    params,
+                    ret: Box::new(ret),
+                })
             }
             Tok::Nil => {
                 self.bump();
-                Ok(TypeExpr::Named { name: "nil".into(), args: vec![] })
+                Ok(TypeExpr::Named {
+                    name: "nil".into(),
+                    args: vec![],
+                })
             }
             Tok::SelfKw => {
                 self.bump();
-                Ok(TypeExpr::Named { name: "Self".into(), args: vec![] })
+                Ok(TypeExpr::Named {
+                    name: "Self".into(),
+                    args: vec![],
+                })
             }
             Tok::Ident(name) => {
                 self.bump();
@@ -811,7 +901,10 @@ impl Parser {
     }
 
     fn stmt_end(&self) -> bool {
-        matches!(self.peek(), Tok::Newline | Tok::Semicolon | Tok::RBrace | Tok::Eof)
+        matches!(
+            self.peek(),
+            Tok::Newline | Tok::Semicolon | Tok::RBrace | Tok::Eof
+        )
     }
 
     fn parse_let(&mut self) -> Result<Stmt> {
@@ -826,7 +919,13 @@ impl Parser {
         };
         self.expect(&Tok::Eq, "'='")?;
         let value = self.parse_expr()?;
-        Ok(Stmt::Let { pattern, mutable, ty, value, pos })
+        Ok(Stmt::Let {
+            pattern,
+            mutable,
+            ty,
+            value,
+            pos,
+        })
     }
 
     // ---- patterns ----
@@ -876,10 +975,18 @@ impl Parser {
                 self.bump();
                 if self.eat(&Tok::DotDotEq) {
                     let hi = self.expect_int()?;
-                    Ok(Pattern::Range { lo: n, hi, inclusive: true })
+                    Ok(Pattern::Range {
+                        lo: n,
+                        hi,
+                        inclusive: true,
+                    })
                 } else if self.eat(&Tok::DotDot) {
                     let hi = self.expect_int()?;
-                    Ok(Pattern::Range { lo: n, hi, inclusive: false })
+                    Ok(Pattern::Range {
+                        lo: n,
+                        hi,
+                        inclusive: false,
+                    })
                 } else {
                     Ok(Pattern::Int(n))
                 }
@@ -946,7 +1053,10 @@ impl Parser {
                         }
                     }
                     self.expect(&Tok::RBrace, "'}'")?;
-                    return Ok(Pattern::Struct { name: path.join("."), fields });
+                    return Ok(Pattern::Struct {
+                        name: path.join("."),
+                        fields,
+                    });
                 }
                 // `name: Type` typed pattern, valid only in a match arm.
                 if allow_typed && self.eat(&Tok::Colon) {
@@ -1032,7 +1142,13 @@ impl Parser {
                 let pos = lhs.pos;
                 self.bump();
                 let ty = self.parse_type()?;
-                lhs = Expr { kind: ExprKind::Cast { expr: Box::new(lhs), ty }, pos };
+                lhs = Expr {
+                    kind: ExprKind::Cast {
+                        expr: Box::new(lhs),
+                        ty,
+                    },
+                    pos,
+                };
                 continue;
             }
 
@@ -1050,7 +1166,10 @@ impl Parser {
                 InfixKind::Coalesce => {
                     let rhs = self.parse_bp(r_bp)?;
                     lhs = Expr {
-                        kind: ExprKind::Coalesce { lhs: Box::new(lhs), rhs: Box::new(rhs) },
+                        kind: ExprKind::Coalesce {
+                            lhs: Box::new(lhs),
+                            rhs: Box::new(rhs),
+                        },
                         pos,
                     };
                 }
@@ -1068,7 +1187,11 @@ impl Parser {
                 InfixKind::Binary(op) => {
                     let rhs = self.parse_bp(r_bp)?;
                     lhs = Expr {
-                        kind: ExprKind::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+                        kind: ExprKind::Binary {
+                            op,
+                            lhs: Box::new(lhs),
+                            rhs: Box::new(rhs),
+                        },
                         pos,
                     };
                 }
@@ -1090,18 +1213,40 @@ impl Parser {
                     // `&raw expr`
                     self.bump();
                     let expr = self.parse_bp(29)?;
-                    return Ok(Expr { kind: ExprKind::Unary { op: UnOp::RawRef, expr: Box::new(expr) }, pos });
+                    return Ok(Expr {
+                        kind: ExprKind::Unary {
+                            op: UnOp::RawRef,
+                            expr: Box::new(expr),
+                        },
+                        pos,
+                    });
                 }
-                let op = if self.eat(&Tok::Mut) { UnOp::RefMut } else { UnOp::Ref };
+                let op = if self.eat(&Tok::Mut) {
+                    UnOp::RefMut
+                } else {
+                    UnOp::Ref
+                };
                 let expr = self.parse_bp(29)?;
-                return Ok(Expr { kind: ExprKind::Unary { op, expr: Box::new(expr) }, pos });
+                return Ok(Expr {
+                    kind: ExprKind::Unary {
+                        op,
+                        expr: Box::new(expr),
+                    },
+                    pos,
+                });
             }
             _ => None,
         };
         if let Some(op) = op {
             self.bump();
             let expr = self.parse_bp(29)?;
-            return Ok(Expr { kind: ExprKind::Unary { op, expr: Box::new(expr) }, pos });
+            return Ok(Expr {
+                kind: ExprKind::Unary {
+                    op,
+                    expr: Box::new(expr),
+                },
+                pos,
+            });
         }
         self.parse_atom()
     }
@@ -1153,24 +1298,43 @@ impl Parser {
                         };
                     } else {
                         lhs = Expr {
-                            kind: ExprKind::Field { recv: Box::new(lhs), optional, name },
+                            kind: ExprKind::Field {
+                                recv: Box::new(lhs),
+                                optional,
+                                name,
+                            },
                             pos,
                         };
                     }
                 }
                 Tok::LParen => {
                     let args = self.parse_args()?;
-                    lhs = Expr { kind: ExprKind::Call { callee: Box::new(lhs), args }, pos };
+                    lhs = Expr {
+                        kind: ExprKind::Call {
+                            callee: Box::new(lhs),
+                            args,
+                        },
+                        pos,
+                    };
                 }
                 Tok::LBracket => {
                     self.bump();
                     let index = self.parse_expr()?;
                     self.expect(&Tok::RBracket, "']'")?;
-                    lhs = Expr { kind: ExprKind::Index { recv: Box::new(lhs), index: Box::new(index) }, pos };
+                    lhs = Expr {
+                        kind: ExprKind::Index {
+                            recv: Box::new(lhs),
+                            index: Box::new(index),
+                        },
+                        pos,
+                    };
                 }
                 Tok::Question => {
                     self.bump();
-                    lhs = Expr { kind: ExprKind::Try(Box::new(lhs)), pos };
+                    lhs = Expr {
+                        kind: ExprKind::Try(Box::new(lhs)),
+                        pos,
+                    };
                 }
                 Tok::ColonColon => {
                     // turbofish on a free function: `f::<T>(...)` or path `A::B`
@@ -1195,7 +1359,10 @@ impl Parser {
                             _ => return self.err("invalid path"),
                         };
                         segs.push(seg);
-                        lhs = Expr { kind: ExprKind::Path(segs), pos };
+                        lhs = Expr {
+                            kind: ExprKind::Path(segs),
+                            pos,
+                        };
                     }
                 }
                 _ => break,
@@ -1281,7 +1448,10 @@ impl Parser {
             Tok::LParen => {
                 self.bump();
                 if self.eat(&Tok::RParen) {
-                    return Ok(Expr { kind: ExprKind::Tuple(vec![]), pos });
+                    return Ok(Expr {
+                        kind: ExprKind::Tuple(vec![]),
+                        pos,
+                    });
                 }
                 let first = self.parse_expr()?;
                 if self.eat(&Tok::Comma) {
@@ -1293,7 +1463,10 @@ impl Parser {
                         }
                     }
                     self.expect(&Tok::RParen, "')'")?;
-                    return Ok(Expr { kind: ExprKind::Tuple(parts), pos });
+                    return Ok(Expr {
+                        kind: ExprKind::Tuple(parts),
+                        pos,
+                    });
                 }
                 self.expect(&Tok::RParen, "')'")?;
                 first.kind
@@ -1303,7 +1476,10 @@ impl Parser {
                 if self.brace_is_block() {
                     let b = self.parse_block()?;
                     let bpos = b.pos;
-                    return Ok(Expr { kind: ExprKind::Block(b), pos: bpos });
+                    return Ok(Expr {
+                        kind: ExprKind::Block(b),
+                        pos: bpos,
+                    });
                 }
                 return self.parse_brace_collection(pos);
             }
@@ -1345,14 +1521,20 @@ impl Parser {
     fn parse_list(&mut self, pos: Pos) -> Result<Expr> {
         self.bump(); // [
         if self.eat(&Tok::RBracket) {
-            return Ok(Expr { kind: ExprKind::List(vec![]), pos });
+            return Ok(Expr {
+                kind: ExprKind::List(vec![]),
+                pos,
+            });
         }
         let first = self.parse_expr()?;
         if self.eat(&Tok::Semicolon) {
             let count = self.parse_expr()?;
             self.expect(&Tok::RBracket, "']'")?;
             return Ok(Expr {
-                kind: ExprKind::ListRepeat { value: Box::new(first), count: Box::new(count) },
+                kind: ExprKind::ListRepeat {
+                    value: Box::new(first),
+                    count: Box::new(count),
+                },
                 pos,
             });
         }
@@ -1366,14 +1548,20 @@ impl Parser {
             }
         }
         self.expect(&Tok::RBracket, "']'")?;
-        Ok(Expr { kind: ExprKind::List(items), pos })
+        Ok(Expr {
+            kind: ExprKind::List(items),
+            pos,
+        })
     }
 
     /// `{}` is an empty map. `{a: b, ...}` is a map. `{a, b}` is a set.
     fn parse_brace_collection(&mut self, pos: Pos) -> Result<Expr> {
         self.bump(); // {
         if self.eat(&Tok::RBrace) {
-            return Ok(Expr { kind: ExprKind::Map(vec![]), pos });
+            return Ok(Expr {
+                kind: ExprKind::Map(vec![]),
+                pos,
+            });
         }
         let first = self.parse_expr()?;
         if self.eat(&Tok::Colon) {
@@ -1389,7 +1577,10 @@ impl Parser {
                 entries.push((k, val));
             }
             self.expect(&Tok::RBrace, "'}'")?;
-            Ok(Expr { kind: ExprKind::Map(entries), pos })
+            Ok(Expr {
+                kind: ExprKind::Map(entries),
+                pos,
+            })
         } else {
             let mut items = vec![first];
             while self.eat(&Tok::Comma) {
@@ -1399,7 +1590,10 @@ impl Parser {
                 items.push(self.parse_expr()?);
             }
             self.expect(&Tok::RBrace, "'}'")?;
-            Ok(Expr { kind: ExprKind::Set(items), pos })
+            Ok(Expr {
+                kind: ExprKind::Set(items),
+                pos,
+            })
         }
     }
 
@@ -1419,7 +1613,10 @@ impl Parser {
                 self.parse_expr()?
             } else {
                 // shorthand `{ x }` == `{ x: x }`
-                Expr { kind: ExprKind::Ident(fname.clone()), pos }
+                Expr {
+                    kind: ExprKind::Ident(fname.clone()),
+                    pos,
+                }
             };
             fields.push((fname, value));
             if !self.eat(&Tok::Comma) {
@@ -1428,7 +1625,14 @@ impl Parser {
             self.skip_terminators();
         }
         self.expect(&Tok::RBrace, "'}'")?;
-        Ok(Expr { kind: ExprKind::StructLit { name, fields, spread }, pos })
+        Ok(Expr {
+            kind: ExprKind::StructLit {
+                name,
+                fields,
+                spread,
+            },
+            pos,
+        })
     }
 
     fn parse_if(&mut self) -> Result<Expr> {
@@ -1442,12 +1646,22 @@ impl Parser {
             } else {
                 let b = self.parse_block()?;
                 let bpos = b.pos;
-                Some(Box::new(Expr { kind: ExprKind::Block(b), pos: bpos }))
+                Some(Box::new(Expr {
+                    kind: ExprKind::Block(b),
+                    pos: bpos,
+                }))
             }
         } else {
             None
         };
-        Ok(Expr { kind: ExprKind::If { cond: Box::new(cond), then, els }, pos })
+        Ok(Expr {
+            kind: ExprKind::If {
+                cond: Box::new(cond),
+                then,
+                els,
+            },
+            pos,
+        })
     }
 
     fn parse_while(&mut self) -> Result<Expr> {
@@ -1459,13 +1673,23 @@ impl Parser {
             let expr = self.parse_expr_no_struct()?;
             let body = self.parse_block()?;
             return Ok(Expr {
-                kind: ExprKind::WhileLet { pattern, expr: Box::new(expr), body },
+                kind: ExprKind::WhileLet {
+                    pattern,
+                    expr: Box::new(expr),
+                    body,
+                },
                 pos,
             });
         }
         let cond = self.parse_expr_no_struct()?;
         let body = self.parse_block()?;
-        Ok(Expr { kind: ExprKind::While { cond: Box::new(cond), body }, pos })
+        Ok(Expr {
+            kind: ExprKind::While {
+                cond: Box::new(cond),
+                body,
+            },
+            pos,
+        })
     }
 
     fn parse_for(&mut self) -> Result<Expr> {
@@ -1475,7 +1699,14 @@ impl Parser {
         self.expect(&Tok::In, "'in'")?;
         let iter = self.parse_expr_no_struct()?;
         let body = self.parse_block()?;
-        Ok(Expr { kind: ExprKind::For { pattern, iter: Box::new(iter), body }, pos })
+        Ok(Expr {
+            kind: ExprKind::For {
+                pattern,
+                iter: Box::new(iter),
+                body,
+            },
+            pos,
+        })
     }
 
     fn parse_match(&mut self) -> Result<Expr> {
@@ -1494,12 +1725,22 @@ impl Parser {
             };
             self.expect(&Tok::FatArrow, "'=>'")?;
             let body = self.parse_expr()?;
-            arms.push(MatchArm { pattern, guard, body });
+            arms.push(MatchArm {
+                pattern,
+                guard,
+                body,
+            });
             self.eat(&Tok::Comma);
             self.skip_terminators();
         }
         self.expect(&Tok::RBrace, "'}'")?;
-        Ok(Expr { kind: ExprKind::Match { scrutinee: Box::new(scrutinee), arms }, pos })
+        Ok(Expr {
+            kind: ExprKind::Match {
+                scrutinee: Box::new(scrutinee),
+                arms,
+            },
+            pos,
+        })
     }
 
     fn parse_closure(&mut self, is_move: bool) -> Result<Expr> {
@@ -1516,7 +1757,11 @@ impl Parser {
                 } else {
                     None
                 };
-                params.push(Param { name, ty, is_self: false });
+                params.push(Param {
+                    name,
+                    ty,
+                    is_self: false,
+                });
                 if !self.eat(&Tok::Comma) {
                     break;
                 }
@@ -1530,11 +1775,21 @@ impl Parser {
         let body = if self.at(&Tok::LBrace) {
             let b = self.parse_block()?;
             let bpos = b.pos;
-            Expr { kind: ExprKind::Block(b), pos: bpos }
+            Expr {
+                kind: ExprKind::Block(b),
+                pos: bpos,
+            }
         } else {
             self.parse_expr()?
         };
-        Ok(Expr { kind: ExprKind::Closure { params, body: Box::new(body), is_move }, pos })
+        Ok(Expr {
+            kind: ExprKind::Closure {
+                params,
+                body: Box::new(body),
+                is_move,
+            },
+            pos,
+        })
     }
 
     fn parse_try_catch(&mut self) -> Result<Expr> {
@@ -1557,7 +1812,11 @@ impl Parser {
                     }
                 }
                 let cbody = self.parse_block()?;
-                catches.push(CatchArm { binding, ty, body: cbody });
+                catches.push(CatchArm {
+                    binding,
+                    ty,
+                    body: cbody,
+                });
             } else if self.at(&Tok::Ident("finally".into())) {
                 self.bump();
                 finally = Some(self.parse_block()?);
@@ -1566,7 +1825,14 @@ impl Parser {
                 break;
             }
         }
-        Ok(Expr { kind: ExprKind::TryCatch { body, catches, finally }, pos })
+        Ok(Expr {
+            kind: ExprKind::TryCatch {
+                body,
+                catches,
+                finally,
+            },
+            pos,
+        })
     }
 }
 
@@ -1617,10 +1883,13 @@ fn parse_fstring(raw: &str, pos: Pos) -> Result<Vec<FStrPart>> {
                 i += 1;
             }
             i += 1; // skip closing }
-            // split optional format spec on the last `:` not inside brackets
+                    // split optional format spec on the last `:` not inside brackets
             let (expr_src, spec) = split_format_spec(&inner);
             let expr = parse_expr_str(&expr_src, pos)?;
-            parts.push(FStrPart::Expr { expr: Box::new(expr), spec });
+            parts.push(FStrPart::Expr {
+                expr: Box::new(expr),
+                spec,
+            });
         } else if c == '}' && chars.get(i + 1) == Some(&'}') {
             lit.push('}');
             i += 2;

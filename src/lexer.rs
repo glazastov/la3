@@ -58,21 +58,21 @@ pub enum Tok {
     Plus,
     Minus,
     Star,
-    StarStar,   // **
+    StarStar, // **
     Slash,
     Percent,
-    Amp,        // &
-    AmpAmp,     // &&
-    Pipe,       // |
-    PipePipe,   // ||
-    Caret,      // ^
-    Tilde,      // ~
-    Shl,        // <<
-    Shr,        // >>
-    Bang,       // !
-    Eq,         // =
-    EqEq,       // ==
-    Ne,         // !=
+    Amp,      // &
+    AmpAmp,   // &&
+    Pipe,     // |
+    PipePipe, // ||
+    Caret,    // ^
+    Tilde,    // ~
+    Shl,      // <<
+    Shr,      // >>
+    Bang,     // !
+    Eq,       // =
+    EqEq,     // ==
+    Ne,       // !=
     Lt,
     Gt,
     Le,
@@ -82,19 +82,19 @@ pub enum Tok {
     StarEq,
     SlashEq,
     PercentEq,
-    DotDot,   // ..
-    DotDotEq, // ..=
-    Question,     // ?
-    QuestionDot,  // ?.
+    DotDot,           // ..
+    DotDotEq,         // ..=
+    Question,         // ?
+    QuestionDot,      // ?.
     QuestionQuestion, // ??
-    Arrow,    // ->
-    FatArrow, // =>
+    Arrow,            // ->
+    FatArrow,         // =>
     Dot,
     Comma,
     Colon,
     ColonColon, // ::
     Semicolon,
-    At,         // @
+    At, // @
     LParen,
     RParen,
     LBrace,
@@ -176,14 +176,22 @@ impl Lexer {
         loop {
             let start = self.pos();
             let c = match self.peek() {
-                None => return Ok(Token { tok: Tok::Eof, pos: start }),
+                None => {
+                    return Ok(Token {
+                        tok: Tok::Eof,
+                        pos: start,
+                    })
+                }
                 Some(c) => c,
             };
 
             // Newlines are significant; emit them.
             if c == '\n' {
                 self.bump();
-                return Ok(Token { tok: Tok::Newline, pos: start });
+                return Ok(Token {
+                    tok: Tok::Newline,
+                    pos: start,
+                });
             }
 
             // Other whitespace is skipped.
@@ -250,7 +258,10 @@ impl Lexer {
                     break;
                 }
             }
-            return Ok(Token { tok: keyword_or_ident(s), pos: start });
+            return Ok(Token {
+                tok: keyword_or_ident(s),
+                pos: start,
+            });
         }
 
         // Numbers.
@@ -409,7 +420,10 @@ impl Lexer {
                     let v = i64::from_str_radix(&digits, radix)
                         .map_err(|_| self.err(start, "invalid integer literal"))?;
                     self.skip_suffix();
-                    return Ok(Token { tok: Tok::Int(v), pos: start });
+                    return Ok(Token {
+                        tok: Tok::Int(v),
+                        pos: start,
+                    });
                 }
             }
         }
@@ -437,11 +451,21 @@ impl Lexer {
         }
         self.skip_suffix();
         if is_float {
-            let v: f64 = s.parse().map_err(|_| self.err(start, "invalid float literal"))?;
-            Ok(Token { tok: Tok::Float(v), pos: start })
+            let v: f64 = s
+                .parse()
+                .map_err(|_| self.err(start, "invalid float literal"))?;
+            Ok(Token {
+                tok: Tok::Float(v),
+                pos: start,
+            })
         } else {
-            let v: i64 = s.parse().map_err(|_| self.err(start, "invalid integer literal"))?;
-            Ok(Token { tok: Tok::Int(v), pos: start })
+            let v: i64 = s
+                .parse()
+                .map_err(|_| self.err(start, "invalid integer literal"))?;
+            Ok(Token {
+                tok: Tok::Int(v),
+                pos: start,
+            })
         }
     }
 
@@ -460,8 +484,18 @@ impl Lexer {
             }
             let ok = matches!(
                 suffix.as_str(),
-                "u8" | "u16" | "u32" | "u64" | "usize" | "i8" | "i16" | "i32" | "i64" | "isize"
-                    | "f32" | "f64" | "byte"
+                "u8" | "u16"
+                    | "u32"
+                    | "u64"
+                    | "usize"
+                    | "i8"
+                    | "i16"
+                    | "i32"
+                    | "i64"
+                    | "isize"
+                    | "f32"
+                    | "f64"
+                    | "byte"
             );
             if !ok {
                 // not a suffix; roll back
@@ -480,13 +514,19 @@ impl Lexer {
                 None => return Err(self.err(start, "unterminated string literal")),
                 Some('"') => break,
                 Some('\\') => {
-                    let e = self.bump().ok_or_else(|| self.err(start, "unterminated escape"))?;
+                    let e = self
+                        .bump()
+                        .ok_or_else(|| self.err(start, "unterminated escape"))?;
                     s.push(unescape(e));
                 }
                 Some(c) => s.push(c),
             }
         }
-        let tok = if is_fstring { Tok::FStr(s) } else { Tok::Str(s) };
+        let tok = if is_fstring {
+            Tok::FStr(s)
+        } else {
+            Tok::Str(s)
+        };
         Ok(Token { tok, pos: start })
     }
 
@@ -495,14 +535,19 @@ impl Lexer {
         let c = match self.bump() {
             None => return Err(self.err(start, "unterminated char literal")),
             Some('\\') => {
-                let e = self.bump().ok_or_else(|| self.err(start, "unterminated escape"))?;
+                let e = self
+                    .bump()
+                    .ok_or_else(|| self.err(start, "unterminated escape"))?;
                 unescape(e)
             }
             Some('\'') => return Err(self.err(start, "empty char literal is not allowed")),
             Some(c) => c,
         };
         match self.bump() {
-            Some('\'') => Ok(Token { tok: Tok::Char(c), pos: start }),
+            Some('\'') => Ok(Token {
+                tok: Tok::Char(c),
+                pos: start,
+            }),
             _ => Err(self.err(start, "char literal must contain exactly one character")),
         }
     }

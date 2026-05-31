@@ -27,14 +27,19 @@ pub enum Item {
     Const(ConstDecl),
     /// Parsed and ignored at runtime in v0.1 (kept so real La3 files load).
     Use(Vec<String>),
-    TypeAlias { name: String, ty: TypeExpr },
+    TypeAlias {
+        name: String,
+        ty: TypeExpr,
+    },
     Interface(InterfaceDecl),
 }
 
 #[derive(Clone, Debug)]
 pub struct FnDecl {
     pub name: String,
-    pub generics: Vec<String>,
+    /// Generic parameters as `(name, interface bounds)`. Bounds drive nominal
+    /// conformance checking (reference Section 9).
+    pub generics: Vec<(String, Vec<String>)>,
     pub params: Vec<Param>,
     pub variadic: Option<Param>,
     pub ret: Option<TypeExpr>,
@@ -265,7 +270,10 @@ pub enum ExprKind {
 #[derive(Clone, Debug)]
 pub enum FStrPart {
     Lit(String),
-    Expr { expr: Box<Expr>, spec: Option<String> },
+    Expr {
+        expr: Box<Expr>,
+        spec: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -295,16 +303,32 @@ pub enum Pattern {
     /// `name @ subpattern`
     At(String, Box<Pattern>),
     /// `lo..=hi` or `lo..hi`
-    Range { lo: i64, hi: i64, inclusive: bool },
+    Range {
+        lo: i64,
+        hi: i64,
+        inclusive: bool,
+    },
     Tuple(Vec<Pattern>),
     /// `[a, b, ..rest]`
-    List { items: Vec<Pattern>, rest: Option<String> },
+    List {
+        items: Vec<Pattern>,
+        rest: Option<String>,
+    },
     /// `Enum.Variant(p, ..)` or `Variant(p, ..)` or bare `Variant`
-    Variant { path: Vec<String>, args: Vec<Pattern> },
+    Variant {
+        path: Vec<String>,
+        args: Vec<Pattern>,
+    },
     /// `Type { a, b }`
-    Struct { name: String, fields: Vec<String> },
+    Struct {
+        name: String,
+        fields: Vec<String>,
+    },
     /// `name: Type` type-narrowing pattern in a union match.
-    Typed { binding: String, ty: TypeExpr },
+    Typed {
+        binding: String,
+        ty: TypeExpr,
+    },
     /// `a | b | c`
     Or(Vec<Pattern>),
 }
@@ -346,14 +370,29 @@ pub enum BinOp {
 /// A type as written in source. Used lightly in v0.1.
 #[derive(Clone, Debug)]
 pub enum TypeExpr {
-    Named { name: String, args: Vec<TypeExpr> },
-    Ref { mutable: bool, inner: Box<TypeExpr> },
-    Ptr { mutable: bool, inner: Box<TypeExpr> },
-    Array { inner: Box<TypeExpr>, size: Option<i64> },
+    Named {
+        name: String,
+        args: Vec<TypeExpr>,
+    },
+    Ref {
+        mutable: bool,
+        inner: Box<TypeExpr>,
+    },
+    Ptr {
+        mutable: bool,
+        inner: Box<TypeExpr>,
+    },
+    Array {
+        inner: Box<TypeExpr>,
+        size: Option<i64>,
+    },
     Slice(Box<TypeExpr>),
     Tuple(Vec<TypeExpr>),
     Union(Vec<TypeExpr>),
-    Fn { params: Vec<TypeExpr>, ret: Box<TypeExpr> },
+    Fn {
+        params: Vec<TypeExpr>,
+        ret: Box<TypeExpr>,
+    },
     Async(Box<TypeExpr>),
     Unit,
     Never,

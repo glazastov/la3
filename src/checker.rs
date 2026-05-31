@@ -1,10 +1,14 @@
-//! A light, conservative checker.
+//! The checker runs in two passes.
 //!
-//! v0.1 does name resolution only: it reports references to names that are not
-//! defined anywhere in scope (locals, parameters, functions, consts, types, enum
-//! variants, the standard modules, or the builtins). It deliberately does not do
-//! full type inference; when it cannot be sure a name is wrong, it stays silent,
-//! so a clean `la3 check` means "no undefined names", not "fully type-correct".
+//! 1. **Name resolution** (this module): reports references to names that are
+//!    not defined anywhere in scope (locals, parameters, functions, consts,
+//!    types, enum variants, the standard modules, or the builtins).
+//! 2. **Type checking** ([`crate::typeck`]): enforces the typing rules from
+//!    reference Sections 2, 4, 7, and 9.
+//!
+//! Name resolution runs first so the type pass can assume that every referenced
+//! name exists; type diagnostics are appended and the combined list is sorted by
+//! source position.
 
 use std::collections::HashSet;
 
@@ -14,7 +18,14 @@ use crate::diag::{Diagnostic, Phase};
 pub fn check(prog: &Program) -> Vec<Diagnostic> {
     let mut r = Resolver::new(prog);
     r.run(prog);
-    r.errors
+    let mut errors = r.errors;
+    // Only run the type pass when names all resolve, so undefined-name noise
+    // does not produce confusing downstream type errors.
+    if errors.is_empty() {
+        errors.extend(crate::typeck::check(prog));
+    }
+    errors.sort_by_key(|d| (d.pos.line, d.pos.col));
+    errors
 }
 
 struct Resolver {
@@ -26,11 +37,9 @@ struct Resolver {
 fn builtins() -> HashSet<String> {
     [
         // free builtins
-        "str", "len", "print", "println", "min", "max", "abs", "idiv", "all", "race",
-        "to_hex", "from_hex",
-        // enum constructors
-        "Some", "None", "Ok", "Err",
-        // modules
+        "str", "len", "print", "println", "min", "max", "abs", "idiv", "all", "race", "to_hex",
+        "from_hex", // enum constructors
+        "Some", "None", "Ok", "Err", // modules
         "io", "fs", "net", "http", "dns", "tcp", "bytes", "crypto", "json", "os", "math",
         // common library types
         "Option", "Result", "List", "Map", "Set", "Vec", "Self", "self",
@@ -71,7 +80,11 @@ impl Resolver {
                 Item::Impl(_) | Item::Use(_) => {}
             }
         }
-        Resolver { globals, scopes: Vec::new(), errors: Vec::new() }
+        Resolver {
+            globals,
+            scopes: Vec::new(),
+            errors: Vec::new(),
+        }
     }
 
     fn run(&mut self, prog: &Program) {
@@ -108,7 +121,7 @@ impl Resolver {
 
     fn fn_decl(&mut self, f: &FnDecl) {
         self.push();
-        for g in &f.generics {
+        for (g, _) in &f.generics {
             self.declare(g);
         }
         for p in &f.params {
@@ -269,19 +282,29 @@ impl Resolver {
                     self.pop();
                 }
             }
-            ExprKind::Loop { body } | ExprKind::Spawn(body) | ExprKind::Unsafe(body) => self.block(body),
+            ExprKind::Loop { body } | ExprKind::Spawn(body) | ExprKind::Unsafe(body) => {
+                self.block(body)
+            }
             ExprKind::While { cond, body } => {
                 self.expr(cond);
                 self.block(body);
             }
-            ExprKind::WhileLet { pattern, expr, body } => {
+            ExprKind::WhileLet {
+                pattern,
+                expr,
+                body,
+            } => {
                 self.expr(expr);
                 self.push();
                 self.bind_pattern(pattern);
                 self.block(body);
                 self.pop();
             }
-            ExprKind::For { pattern, iter, body } => {
+            ExprKind::For {
+                pattern,
+                iter,
+                body,
+            } => {
                 self.expr(iter);
                 self.push();
                 self.bind_pattern(pattern);
@@ -301,7 +324,11 @@ impl Resolver {
                 self.pop();
             }
             ExprKind::Try(e) | ExprKind::Await(e) => self.expr(e),
-            ExprKind::TryCatch { body, catches, finally } => {
+            ExprKind::TryCatch {
+                body,
+                catches,
+                finally,
+            } => {
                 self.block(body);
                 for c in catches {
                     self.push();

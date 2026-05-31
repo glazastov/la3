@@ -35,9 +35,20 @@ pub enum Value {
     Map(MapRef),
     Set(ListRef),
     Tuple(Rc<Vec<Value>>),
-    Range { start: i64, end: i64, inclusive: bool },
-    Struct { name: Rc<String>, fields: FieldsRef },
-    Enum { ty: Rc<String>, variant: Rc<String>, data: Rc<Vec<Value>> },
+    Range {
+        start: i64,
+        end: i64,
+        inclusive: bool,
+    },
+    Struct {
+        name: Rc<String>,
+        fields: FieldsRef,
+    },
+    Enum {
+        ty: Rc<String>,
+        variant: Rc<String>,
+        data: Rc<Vec<Value>>,
+    },
     Closure(Rc<ClosureData>),
     Function(Rc<FnDecl>),
     Unit,
@@ -72,13 +83,25 @@ impl Value {
 }
 
 fn some(v: Value) -> Value {
-    Value::Enum { ty: Rc::new("Option".into()), variant: Rc::new("Some".into()), data: Rc::new(vec![v]) }
+    Value::Enum {
+        ty: Rc::new("Option".into()),
+        variant: Rc::new("Some".into()),
+        data: Rc::new(vec![v]),
+    }
 }
 fn ok(v: Value) -> Value {
-    Value::Enum { ty: Rc::new("Result".into()), variant: Rc::new("Ok".into()), data: Rc::new(vec![v]) }
+    Value::Enum {
+        ty: Rc::new("Result".into()),
+        variant: Rc::new("Ok".into()),
+        data: Rc::new(vec![v]),
+    }
 }
 fn err(v: Value) -> Value {
-    Value::Enum { ty: Rc::new("Result".into()), variant: Rc::new("Err".into()), data: Rc::new(vec![v]) }
+    Value::Enum {
+        ty: Rc::new("Result".into()),
+        variant: Rc::new("Err".into()),
+        data: Rc::new(vec![v]),
+    }
 }
 fn str_val(s: impl Into<String>) -> Value {
     Value::Str(Rc::new(s.into()))
@@ -102,7 +125,10 @@ pub struct Scope {
 pub type Env = Rc<RefCell<Scope>>;
 
 fn new_scope(parent: Option<Env>) -> Env {
-    Rc::new(RefCell::new(Scope { vars: HashMap::new(), parent }))
+    Rc::new(RefCell::new(Scope {
+        vars: HashMap::new(),
+        parent,
+    }))
 }
 
 fn lookup(env: &Env, name: &str) -> Option<Rc<RefCell<Value>>> {
@@ -128,7 +154,10 @@ fn lookup_var(env: &Env, name: &str) -> Option<(Rc<RefCell<Value>>, bool)> {
 fn define(env: &Env, name: &str, value: Value, mutable: bool) {
     env.borrow_mut().vars.insert(
         name.to_string(),
-        Var { cell: Rc::new(RefCell::new(value)), mutable },
+        Var {
+            cell: Rc::new(RefCell::new(value)),
+            mutable,
+        },
     );
 }
 
@@ -204,7 +233,12 @@ impl Interp {
         for item in &prog.items {
             match item {
                 Item::Fn(f) => {
-                    define(&self.globals, &f.name, Value::Function(Rc::new(f.clone())), false);
+                    define(
+                        &self.globals,
+                        &f.name,
+                        Value::Function(Rc::new(f.clone())),
+                        false,
+                    );
                 }
                 Item::Struct(s) => {
                     self.structs.insert(s.name.clone(), s.clone());
@@ -252,7 +286,13 @@ impl Interp {
 
     fn eval_stmt(&mut self, stmt: &Stmt, env: &Env) -> R<()> {
         match stmt {
-            Stmt::Let { pattern, mutable, ty, value, .. } => {
+            Stmt::Let {
+                pattern,
+                mutable,
+                ty,
+                value,
+                ..
+            } => {
                 let mut v = self.eval(value, env)?;
                 // An empty `{}` is a Map by default; coerce it to a Set when the
                 // binding is annotated `Set<...>`.
@@ -386,7 +426,9 @@ impl Interp {
                     Ok(l)
                 }
             }
-            ExprKind::Assign { target, op, value } => self.eval_assign(target, *op, value, env, pos),
+            ExprKind::Assign { target, op, value } => {
+                self.eval_assign(target, *op, value, env, pos)
+            }
             ExprKind::Cast { expr, ty } => {
                 let v = self.eval(expr, env)?;
                 self.cast(v, ty, pos)
@@ -434,7 +476,11 @@ impl Interp {
                 }
                 Ok(Value::Set(Rc::new(RefCell::new(vs))))
             }
-            ExprKind::Range { start, end, inclusive } => {
+            ExprKind::Range {
+                start,
+                end,
+                inclusive,
+            } => {
                 let s = self.eval(start, env)?;
                 let e = self.eval(end, env)?;
                 Ok(Value::Range {
@@ -443,9 +489,11 @@ impl Interp {
                     inclusive: *inclusive,
                 })
             }
-            ExprKind::StructLit { name, fields, spread } => {
-                self.eval_struct_lit(name, fields, spread, env, pos)
-            }
+            ExprKind::StructLit {
+                name,
+                fields,
+                spread,
+            } => self.eval_struct_lit(name, fields, spread, env, pos),
             ExprKind::Block(b) => self.eval_block(b, env),
             ExprKind::If { cond, then, els } => {
                 let c = self.eval(cond, env)?;
@@ -460,22 +508,34 @@ impl Interp {
             ExprKind::Match { scrutinee, arms } => self.eval_match(scrutinee, arms, env, pos),
             ExprKind::Loop { body } => self.eval_loop(body, env),
             ExprKind::While { cond, body } => self.eval_while(cond, body, env, pos),
-            ExprKind::WhileLet { pattern, expr, body } => {
-                self.eval_while_let(pattern, expr, body, env)
-            }
-            ExprKind::For { pattern, iter, body } => self.eval_for(pattern, iter, body, env, pos),
+            ExprKind::WhileLet {
+                pattern,
+                expr,
+                body,
+            } => self.eval_while_let(pattern, expr, body, env),
+            ExprKind::For {
+                pattern,
+                iter,
+                body,
+            } => self.eval_for(pattern, iter, body, env, pos),
             ExprKind::Closure { params, body, .. } => Ok(Value::Closure(Rc::new(ClosureData {
                 params: params.clone(),
                 body: (**body).clone(),
                 env: env.clone(),
             }))),
             ExprKind::Call { callee, args } => self.eval_call(callee, args, env, pos),
-            ExprKind::MethodCall { recv, optional, method, args, .. } => {
-                self.eval_method(recv, *optional, method, args, env, pos)
-            }
-            ExprKind::Field { recv, optional, name } => {
-                self.eval_field(recv, *optional, name, env, pos)
-            }
+            ExprKind::MethodCall {
+                recv,
+                optional,
+                method,
+                args,
+                ..
+            } => self.eval_method(recv, *optional, method, args, env, pos),
+            ExprKind::Field {
+                recv,
+                optional,
+                name,
+            } => self.eval_field(recv, *optional, name, env, pos),
             ExprKind::Index { recv, index } => self.eval_index(recv, index, env, pos),
             ExprKind::Try(inner) => {
                 let v = self.eval(inner, env)?;
@@ -493,7 +553,11 @@ impl Interp {
             ExprKind::Await(inner) => self.eval(inner, env),
             ExprKind::Spawn(body) => self.eval_block(body, env),
             ExprKind::Unsafe(body) => self.eval_block(body, env),
-            ExprKind::TryCatch { body, catches, finally } => {
+            ExprKind::TryCatch {
+                body,
+                catches,
+                finally,
+            } => {
                 let result = self.eval_block(body, env);
                 let out = match result {
                     Err(Signal::Error(d)) => {
@@ -615,7 +679,10 @@ impl Interp {
         }
 
         // Bitwise on integers.
-        if matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr) {
+        if matches!(
+            op,
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr
+        ) {
             let a = self.as_int(&l, pos)?;
             let b = self.as_int(&r, pos)?;
             let v = match op {
@@ -680,7 +747,12 @@ impl Interp {
             (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
             (Value::Str(a), Value::Str(b)) => a.partial_cmp(b),
             (Value::Char(a), Value::Char(b)) => a.partial_cmp(b),
-            _ => return rt(pos, format!("cannot compare {} and {}", l.type_name(), r.type_name())),
+            _ => {
+                return rt(
+                    pos,
+                    format!("cannot compare {} and {}", l.type_name(), r.type_name()),
+                )
+            }
         };
         let res = match ord {
             Some(o) => match op {
@@ -706,10 +778,21 @@ impl Interp {
         let rhs = self.eval(value, env)?;
         match &target.kind {
             ExprKind::Ident(name) => {
-                let (cell, mutable) = lookup_var(env, name)
-                    .ok_or_else(|| Signal::Error(Diagnostic::new(Phase::Runtime, pos, format!("undefined name '{}'", name))))?;
+                let (cell, mutable) = lookup_var(env, name).ok_or_else(|| {
+                    Signal::Error(Diagnostic::new(
+                        Phase::Runtime,
+                        pos,
+                        format!("undefined name '{}'", name),
+                    ))
+                })?;
                 if !mutable {
-                    return rt(pos, format!("cannot assign to immutable binding '{}' (declare it `let mut`)", name));
+                    return rt(
+                        pos,
+                        format!(
+                            "cannot assign to immutable binding '{}' (declare it `let mut`)",
+                            name
+                        ),
+                    );
                 }
                 let new = self.apply_compound(op, cell.borrow().clone(), rhs, pos)?;
                 *cell.borrow_mut() = new;
@@ -778,7 +861,9 @@ impl Interp {
                     BinOp::Rem => a % c,
                     _ => return rt(pos, "bad compound operator"),
                 })),
-                (Value::Str(a), Value::Str(c)) if b == BinOp::Add => Ok(str_val(format!("{}{}", a, c))),
+                (Value::Str(a), Value::Str(c)) if b == BinOp::Add => {
+                    Ok(str_val(format!("{}{}", a, c)))
+                }
                 _ => rt(pos, "type mismatch in compound assignment"),
             },
         }
@@ -806,7 +891,10 @@ impl Interp {
             map.insert(k.clone(), v);
         }
         let _ = pos;
-        Ok(Value::Struct { name: Rc::new(name.to_string()), fields: Rc::new(RefCell::new(map)) })
+        Ok(Value::Struct {
+            name: Rc::new(name.to_string()),
+            fields: Rc::new(RefCell::new(map)),
+        })
     }
 
     fn eval_match(&mut self, scrut: &Expr, arms: &[MatchArm], env: &Env, pos: Pos) -> R<Value> {
@@ -823,7 +911,10 @@ impl Interp {
                 return self.eval(&arm.body, &menv);
             }
         }
-        rt(pos, "no match arm matched (match is meant to be exhaustive)")
+        rt(
+            pos,
+            "no match arm matched (match is meant to be exhaustive)",
+        )
     }
 
     fn try_match(&mut self, pat: &Pattern, value: &Value, env: &Env) -> R<bool> {
@@ -840,7 +931,11 @@ impl Interp {
             Pattern::Nil => Ok(matches!(value, Value::Nil)),
             Pattern::Range { lo, hi, inclusive } => {
                 if let Value::Int(n) = value {
-                    Ok(if *inclusive { n >= lo && n <= hi } else { n >= lo && n < hi })
+                    Ok(if *inclusive {
+                        n >= lo && n <= hi
+                    } else {
+                        n >= lo && n < hi
+                    })
                 } else {
                     Ok(false)
                 }
@@ -992,7 +1087,14 @@ impl Interp {
         Ok(Value::Unit)
     }
 
-    fn eval_for(&mut self, pat: &Pattern, iter: &Expr, body: &Block, env: &Env, pos: Pos) -> R<Value> {
+    fn eval_for(
+        &mut self,
+        pat: &Pattern,
+        iter: &Expr,
+        body: &Block,
+        env: &Env,
+        pos: Pos,
+    ) -> R<Value> {
         let it = self.eval(iter, env)?;
         let items = self.iterate(&it, pos)?;
         for item in items {
@@ -1010,7 +1112,11 @@ impl Interp {
 
     fn iterate(&self, v: &Value, pos: Pos) -> R<Vec<Value>> {
         match v {
-            Value::Range { start, end, inclusive } => {
+            Value::Range {
+                start,
+                end,
+                inclusive,
+            } => {
                 let mut out = Vec::new();
                 let hi = if *inclusive { *end + 1 } else { *end };
                 let mut i = *start;
@@ -1059,7 +1165,9 @@ impl Interp {
         }
         if let ExprKind::Path(segs) = &callee.kind {
             // `Enum::Variant(args)`
-            if segs.len() == 2 && (self.enums.contains_key(&segs[0]) || segs[0] == "Option" || segs[0] == "Result") {
+            if segs.len() == 2
+                && (self.enums.contains_key(&segs[0]) || segs[0] == "Option" || segs[0] == "Result")
+            {
                 let mut data = Vec::new();
                 for a in args {
                     data.push(self.eval(a, env)?);
@@ -1094,13 +1202,23 @@ impl Interp {
         }
     }
 
-    fn call_fn(&mut self, decl: &FnDecl, self_val: Option<Value>, args: Vec<Value>, pos: Pos) -> R<Value> {
+    fn call_fn(
+        &mut self,
+        decl: &FnDecl,
+        self_val: Option<Value>,
+        args: Vec<Value>,
+        pos: Pos,
+    ) -> R<Value> {
         let scope = new_scope(Some(self.globals.clone()));
         // variadic handling
         let fixed: Vec<&Param> = decl.params.iter().filter(|p| !p.is_self).collect();
         if decl.variadic.is_some() {
             let n = fixed.len();
-            let (head, tail) = if args.len() >= n { args.split_at(n) } else { (&args[..], &[][..]) };
+            let (head, tail) = if args.len() >= n {
+                args.split_at(n)
+            } else {
+                (&args[..], &[][..])
+            };
             // bind self
             if let Some(sv) = self_val {
                 define(&scope, "self", sv, true);
@@ -1122,7 +1240,14 @@ impl Interp {
 
     // ---- field / method / index ----
 
-    fn eval_field(&mut self, recv: &Expr, optional: bool, name: &str, env: &Env, pos: Pos) -> R<Value> {
+    fn eval_field(
+        &mut self,
+        recv: &Expr,
+        optional: bool,
+        name: &str,
+        env: &Env,
+        pos: Pos,
+    ) -> R<Value> {
         // `EnumName.Variant` unit variant.
         if let ExprKind::Ident(tyname) = &recv.kind {
             if lookup(env, tyname).is_none()
@@ -1144,7 +1269,9 @@ impl Interp {
             return Ok(Value::Nil);
         }
         match &obj {
-            Value::Struct { fields, .. } => Ok(fields.borrow().get(name).cloned().unwrap_or(Value::Nil)),
+            Value::Struct { fields, .. } => {
+                Ok(fields.borrow().get(name).cloned().unwrap_or(Value::Nil))
+            }
             Value::Tuple(items) => {
                 if let Ok(i) = name.parse::<usize>() {
                     Ok(items.get(i).cloned().unwrap_or(Value::Nil))
@@ -1152,7 +1279,10 @@ impl Interp {
                     rt(pos, "tuple fields are numeric")
                 }
             }
-            _ => rt(pos, format!("type {} has no field '{}'", obj.type_name(), name)),
+            _ => rt(
+                pos,
+                format!("type {} has no field '{}'", obj.type_name(), name),
+            ),
         }
     }
 
@@ -1183,7 +1313,12 @@ impl Interp {
                         .enums
                         .get(tyname)
                         .map(|e| e.variants.iter().any(|v| v.name == method))
-                        .unwrap_or(method == "Some" || method == "None" || method == "Ok" || method == "Err");
+                        .unwrap_or(
+                            method == "Some"
+                                || method == "None"
+                                || method == "Ok"
+                                || method == "Err",
+                        );
                     if is_variant {
                         let mut data = Vec::new();
                         for a in args {
@@ -1243,17 +1378,27 @@ impl Interp {
         let i = self.eval(index, env)?;
         match &c {
             Value::List(l) => {
-                if let Value::Range { start, end, inclusive } = i {
+                if let Value::Range {
+                    start,
+                    end,
+                    inclusive,
+                } = i
+                {
                     let b = l.borrow();
-                    let hi = (if inclusive { end + 1 } else { end }).clamp(0, b.len() as i64) as usize;
+                    let hi =
+                        (if inclusive { end + 1 } else { end }).clamp(0, b.len() as i64) as usize;
                     let lo = start.clamp(0, b.len() as i64) as usize;
                     Ok(list_val(b[lo..hi.max(lo)].to_vec()))
                 } else {
                     let idx = self.as_int(&i, pos)?;
                     let b = l.borrow();
-                    b.get(idx as usize)
-                        .cloned()
-                        .ok_or_else(|| Signal::Error(Diagnostic::new(Phase::Runtime, pos, "list index out of bounds")))
+                    b.get(idx as usize).cloned().ok_or_else(|| {
+                        Signal::Error(Diagnostic::new(
+                            Phase::Runtime,
+                            pos,
+                            "list index out of bounds",
+                        ))
+                    })
                 }
             }
             Value::Map(m) => {
@@ -1261,14 +1406,23 @@ impl Interp {
                 b.iter()
                     .find(|(k, _)| value_eq(k, &i))
                     .map(|(_, v)| v.clone())
-                    .ok_or_else(|| Signal::Error(Diagnostic::new(Phase::Runtime, pos, "key not present in map")))
+                    .ok_or_else(|| {
+                        Signal::Error(Diagnostic::new(
+                            Phase::Runtime,
+                            pos,
+                            "key not present in map",
+                        ))
+                    })
             }
             Value::Str(s) => {
                 let idx = self.as_int(&i, pos)?;
-                s.chars()
-                    .nth(idx as usize)
-                    .map(Value::Char)
-                    .ok_or_else(|| Signal::Error(Diagnostic::new(Phase::Runtime, pos, "string index out of bounds")))
+                s.chars().nth(idx as usize).map(Value::Char).ok_or_else(|| {
+                    Signal::Error(Diagnostic::new(
+                        Phase::Runtime,
+                        pos,
+                        "string index out of bounds",
+                    ))
+                })
             }
             _ => rt(pos, format!("cannot index {}", c.type_name())),
         }
@@ -1318,7 +1472,10 @@ impl Interp {
         match v {
             Value::Tuple(t) => Ok((**t).clone()),
             Value::List(l) => Ok(l.borrow().clone()),
-            _ => rt(pos, format!("expected a tuple or list, found {}", v.type_name())),
+            _ => rt(
+                pos,
+                format!("expected a tuple or list, found {}", v.type_name()),
+            ),
         }
     }
 
@@ -1334,7 +1491,11 @@ impl Interp {
     }
 
     fn cast(&self, v: Value, ty: &TypeExpr, pos: Pos) -> R<Value> {
-        let name = if let TypeExpr::Named { name, .. } = ty { name.as_str() } else { "" };
+        let name = if let TypeExpr::Named { name, .. } = ty {
+            name.as_str()
+        } else {
+            ""
+        };
         match name {
             "f64" | "f32" => Ok(Value::Float(self.as_f64(&v, pos)?)),
             "i8" | "i16" | "i32" | "i64" | "isize" => {
@@ -1356,9 +1517,9 @@ impl Interp {
                 Ok(Value::Int(mask_uint(n, name)))
             }
             "char" => match v {
-                Value::Int(n) => char::from_u32(n as u32)
-                    .map(Value::Char)
-                    .ok_or_else(|| Signal::Error(Diagnostic::new(Phase::Runtime, pos, "invalid char code"))),
+                Value::Int(n) => char::from_u32(n as u32).map(Value::Char).ok_or_else(|| {
+                    Signal::Error(Diagnostic::new(Phase::Runtime, pos, "invalid char code"))
+                }),
                 Value::Char(c) => Ok(Value::Char(c)),
                 _ => rt(pos, "cannot cast to char"),
             },
@@ -1369,14 +1530,22 @@ impl Interp {
 
     // ---- builtins ----
 
-    fn try_builtin_fn(&mut self, name: &str, args: &[Expr], env: &Env, pos: Pos) -> R<Option<Value>> {
+    fn try_builtin_fn(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        env: &Env,
+        pos: Pos,
+    ) -> R<Option<Value>> {
         let mut argv = Vec::with_capacity(args.len());
         for a in args {
             argv.push(self.eval(a, env)?);
         }
         let v = match name {
             "str" => Some(str_val(display(argv.get(0).unwrap_or(&Value::Unit)))),
-            "len" => Some(Value::Int(self.len_of(argv.get(0).unwrap_or(&Value::Unit), pos)? as i64)),
+            "len" => Some(Value::Int(
+                self.len_of(argv.get(0).unwrap_or(&Value::Unit), pos)? as i64,
+            )),
             "print" => {
                 print!("{}", display(argv.get(0).unwrap_or(&Value::Unit)));
                 Some(Value::Unit)
@@ -1439,7 +1608,11 @@ impl Interp {
                         }
                         i += 2;
                     }
-                    Some(if okv { ok(list_val(out)) } else { err(str_val("invalid hex")) })
+                    Some(if okv {
+                        ok(list_val(out))
+                    } else {
+                        err(str_val("invalid hex"))
+                    })
                 }
             }
             _ => None,
@@ -1454,8 +1627,20 @@ impl Interp {
         let mut best = args[0].clone();
         for v in &args[1..] {
             let take = match (&best, v) {
-                (Value::Int(a), Value::Int(b)) => if want_min { b < a } else { b > a },
-                (Value::Float(a), Value::Float(b)) => if want_min { b < a } else { b > a },
+                (Value::Int(a), Value::Int(b)) => {
+                    if want_min {
+                        b < a
+                    } else {
+                        b > a
+                    }
+                }
+                (Value::Float(a), Value::Float(b)) => {
+                    if want_min {
+                        b < a
+                    } else {
+                        b > a
+                    }
+                }
                 _ => return rt(pos, "min/max expects numbers of the same type"),
             };
             if take {
@@ -1493,10 +1678,15 @@ impl Interp {
                 let code = self.as_int(&a0(), pos).unwrap_or(0);
                 std::process::exit(code as i32);
             }
-            ("os", "args") => Ok(list_val(self.args.iter().map(|a| str_val(a.clone())).collect())),
+            ("os", "args") => Ok(list_val(
+                self.args.iter().map(|a| str_val(a.clone())).collect(),
+            )),
             ("os", "env") => {
                 let key = display(&a0());
-                Ok(std::env::var(&key).map(str_val).map(some).unwrap_or(Value::Nil))
+                Ok(std::env::var(&key)
+                    .map(str_val)
+                    .map(some)
+                    .unwrap_or(Value::Nil))
             }
             ("fs", "read") => {
                 let path = display(&a0());
@@ -1535,7 +1725,14 @@ impl Interp {
         }
     }
 
-    fn builtin_method(&mut self, recv: Value, method: &str, args: Vec<Value>, _env: &Env, pos: Pos) -> R<Value> {
+    fn builtin_method(
+        &mut self,
+        recv: Value,
+        method: &str,
+        args: Vec<Value>,
+        _env: &Env,
+        pos: Pos,
+    ) -> R<Value> {
         match &recv {
             // ---- universal ----
             _ if method == "len" => Ok(Value::Int(self.len_of(&recv, pos)? as i64)),
@@ -1543,7 +1740,13 @@ impl Interp {
         }
     }
 
-    fn builtin_method_inner(&mut self, recv: Value, method: &str, args: Vec<Value>, pos: Pos) -> R<Value> {
+    fn builtin_method_inner(
+        &mut self,
+        recv: Value,
+        method: &str,
+        args: Vec<Value>,
+        pos: Pos,
+    ) -> R<Value> {
         match recv {
             // ---- Option / Result (Enum) and None (Nil) ----
             Value::Nil => match method {
@@ -1559,7 +1762,11 @@ impl Interp {
                 "map_err" => Ok(Value::Nil),
                 _ => rt(pos, format!("nil has no method '{}'", method)),
             },
-            Value::Enum { ref ty, ref variant, ref data } if ty.as_str() == "Option" || ty.as_str() == "Result" => {
+            Value::Enum {
+                ref ty,
+                ref variant,
+                ref data,
+            } if ty.as_str() == "Option" || ty.as_str() == "Result" => {
                 let inner = data.get(0).cloned();
                 match method {
                     "is_some" => Ok(Value::Bool(variant.as_str() == "Some")),
@@ -1647,20 +1854,30 @@ impl Interp {
             Value::Map(ref m) => match method {
                 "get" => {
                     let k = args.into_iter().next().unwrap_or(Value::Nil);
-                    let found = m.borrow().iter().find(|(kk, _)| value_eq(kk, &k)).map(|(_, v)| v.clone());
+                    let found = m
+                        .borrow()
+                        .iter()
+                        .find(|(kk, _)| value_eq(kk, &k))
+                        .map(|(_, v)| v.clone());
                     Ok(found.map(some).unwrap_or(Value::Nil))
                 }
                 "contains" | "contains_key" => {
                     let k = args.into_iter().next().unwrap_or(Value::Nil);
-                    Ok(Value::Bool(m.borrow().iter().any(|(kk, _)| value_eq(kk, &k))))
+                    Ok(Value::Bool(
+                        m.borrow().iter().any(|(kk, _)| value_eq(kk, &k)),
+                    ))
                 }
                 "remove" => {
                     let k = args.into_iter().next().unwrap_or(Value::Nil);
                     m.borrow_mut().retain(|(kk, _)| !value_eq(kk, &k));
                     Ok(Value::Unit)
                 }
-                "keys" => Ok(list_val(m.borrow().iter().map(|(k, _)| k.clone()).collect())),
-                "values" => Ok(list_val(m.borrow().iter().map(|(_, v)| v.clone()).collect())),
+                "keys" => Ok(list_val(
+                    m.borrow().iter().map(|(k, _)| k.clone()).collect(),
+                )),
+                "values" => Ok(list_val(
+                    m.borrow().iter().map(|(_, v)| v.clone()).collect(),
+                )),
                 "is_empty" => Ok(Value::Bool(m.borrow().is_empty())),
                 _ => rt(pos, format!("Map has no method '{}'", method)),
             },
@@ -1679,7 +1896,10 @@ impl Interp {
                 _ => rt(pos, format!("float has no method '{}'", method)),
             },
 
-            other => rt(pos, format!("type {} has no method '{}'", other.type_name(), method)),
+            other => rt(
+                pos,
+                format!("type {} has no method '{}'", other.type_name(), method),
+            ),
         }
     }
 
@@ -1739,7 +1959,8 @@ impl Interp {
     fn list_method(&mut self, l: ListRef, method: &str, args: Vec<Value>, pos: Pos) -> R<Value> {
         match method {
             "push" | "append" => {
-                l.borrow_mut().push(args.into_iter().next().unwrap_or(Value::Nil));
+                l.borrow_mut()
+                    .push(args.into_iter().next().unwrap_or(Value::Nil));
                 Ok(Value::Unit)
             }
             "pop" => Ok(l.borrow_mut().pop().map(some).unwrap_or(Value::Nil)),
@@ -1793,7 +2014,11 @@ impl Interp {
                 for i in 1..snapshot.len() {
                     let mut j = i;
                     while j > 0 {
-                        let before = self.call_value(f.clone(), vec![snapshot[j].clone(), snapshot[j - 1].clone()], pos)?;
+                        let before = self.call_value(
+                            f.clone(),
+                            vec![snapshot[j].clone(), snapshot[j - 1].clone()],
+                            pos,
+                        )?;
                         if self.as_bool(&before, pos)? {
                             snapshot.swap(j, j - 1);
                             j -= 1;
@@ -1843,7 +2068,10 @@ impl Interp {
             "collect" => {
                 // Collecting a list of pairs builds a map; otherwise identity.
                 let b = l.borrow();
-                if b.iter().all(|v| matches!(v, Value::Tuple(t) if t.len() == 2)) && !b.is_empty() {
+                if b.iter()
+                    .all(|v| matches!(v, Value::Tuple(t) if t.len() == 2))
+                    && !b.is_empty()
+                {
                     let entries: Vec<(Value, Value)> = b
                         .iter()
                         .map(|v| {
@@ -1874,7 +2102,11 @@ impl Interp {
                         _ => return rt(pos, "sum expects numbers"),
                     }
                 }
-                Ok(if is_float { Value::Float(facc + acc as f64) } else { Value::Int(acc) })
+                Ok(if is_float {
+                    Value::Float(facc + acc as f64)
+                } else {
+                    Value::Int(acc)
+                })
             }
             _ => rt(pos, format!("List has no method '{}'", method)),
         }
@@ -1899,7 +2131,10 @@ fn bind_params(params: &[Param], self_val: Option<Value>, args: Vec<Value>, scop
 fn make_exception(message: &str) -> Value {
     let mut m = HashMap::new();
     m.insert("message".to_string(), str_val(message.to_string()));
-    Value::Struct { name: Rc::new("Exception".into()), fields: Rc::new(RefCell::new(m)) }
+    Value::Struct {
+        name: Rc::new("Exception".into()),
+        fields: Rc::new(RefCell::new(m)),
+    }
 }
 
 fn is_module(name: &str) -> bool {
@@ -1942,7 +2177,11 @@ fn type_matches(v: &Value, ty: &TypeExpr) -> bool {
         _ => return true,
     };
     match (v, name) {
-        (Value::Int(_), "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "isize" | "usize" | "byte" | "int") => true,
+        (
+            Value::Int(_),
+            "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "isize" | "usize"
+            | "byte" | "int",
+        ) => true,
         (Value::Float(_), "f32" | "f64" | "float") => true,
         (Value::Str(_), "str") => true,
         (Value::Bool(_), "bool") => true,
@@ -1973,13 +2212,39 @@ fn value_eq(a: &Value, b: &Value) -> bool {
             let (x, y) = (x.borrow(), y.borrow());
             x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| value_eq(p, q))
         }
-        (Value::Enum { ty: t1, variant: v1, data: d1 }, Value::Enum { ty: t2, variant: v2, data: d2 }) => {
-            t1 == t2 && v1 == v2 && d1.len() == d2.len() && d1.iter().zip(d2.iter()).all(|(p, q)| value_eq(p, q))
+        (
+            Value::Enum {
+                ty: t1,
+                variant: v1,
+                data: d1,
+            },
+            Value::Enum {
+                ty: t2,
+                variant: v2,
+                data: d2,
+            },
+        ) => {
+            t1 == t2
+                && v1 == v2
+                && d1.len() == d2.len()
+                && d1.iter().zip(d2.iter()).all(|(p, q)| value_eq(p, q))
         }
-        (Value::Struct { name: n1, fields: f1 }, Value::Struct { name: n2, fields: f2 }) => {
+        (
+            Value::Struct {
+                name: n1,
+                fields: f1,
+            },
+            Value::Struct {
+                name: n2,
+                fields: f2,
+            },
+        ) => {
             n1 == n2 && {
                 let (f1, f2) = (f1.borrow(), f2.borrow());
-                f1.len() == f2.len() && f1.iter().all(|(k, v)| f2.get(k).map_or(false, |w| value_eq(v, w)))
+                f1.len() == f2.len()
+                    && f1
+                        .iter()
+                        .all(|(k, v)| f2.get(k).map_or(false, |w| value_eq(v, w)))
             }
         }
         (Value::Unit, Value::Unit) => true,
@@ -2012,14 +2277,22 @@ pub fn display(v: &Value) -> String {
             format!("{{{}}}", inner.join(", "))
         }
         Value::Map(m) => {
-            let inner: Vec<String> = m.borrow().iter().map(|(k, v)| format!("{}: {}", display(k), display(v))).collect();
+            let inner: Vec<String> = m
+                .borrow()
+                .iter()
+                .map(|(k, v)| format!("{}: {}", display(k), display(v)))
+                .collect();
             format!("{{{}}}", inner.join(", "))
         }
         Value::Tuple(t) => {
             let inner: Vec<String> = t.iter().map(display).collect();
             format!("({})", inner.join(", "))
         }
-        Value::Range { start, end, inclusive } => {
+        Value::Range {
+            start,
+            end,
+            inclusive,
+        } => {
             if *inclusive {
                 format!("{}..={}", start, end)
             } else {
@@ -2028,7 +2301,10 @@ pub fn display(v: &Value) -> String {
         }
         Value::Struct { name, fields } => {
             let f = fields.borrow();
-            let inner: Vec<String> = f.iter().map(|(k, v)| format!("{}: {}", k, display(v))).collect();
+            let inner: Vec<String> = f
+                .iter()
+                .map(|(k, v)| format!("{}: {}", k, display(v)))
+                .collect();
             format!("{} {{ {} }}", name, inner.join(", "))
         }
         Value::Enum { variant, data, .. } => {
@@ -2044,8 +2320,16 @@ pub fn display(v: &Value) -> String {
 }
 
 fn json_encode(v: &Value, pretty: bool, indent: usize) -> String {
-    let pad = if pretty { "  ".repeat(indent + 1) } else { String::new() };
-    let pad_end = if pretty { "  ".repeat(indent) } else { String::new() };
+    let pad = if pretty {
+        "  ".repeat(indent + 1)
+    } else {
+        String::new()
+    };
+    let pad_end = if pretty {
+        "  ".repeat(indent)
+    } else {
+        String::new()
+    };
     let nl = if pretty { "\n" } else { "" };
     let sep = if pretty { ",\n" } else { "," };
     match v {
@@ -2072,7 +2356,12 @@ fn json_encode(v: &Value, pretty: bool, indent: usize) -> String {
                 .borrow()
                 .iter()
                 .map(|(k, val)| {
-                    format!("{}{}: {}", pad, json_string(&display(k)), json_encode(val, pretty, indent + 1))
+                    format!(
+                        "{}{}: {}",
+                        pad,
+                        json_string(&display(k)),
+                        json_encode(val, pretty, indent + 1)
+                    )
                 })
                 .collect();
             if items.is_empty() {
@@ -2085,7 +2374,14 @@ fn json_encode(v: &Value, pretty: bool, indent: usize) -> String {
             let items: Vec<String> = fields
                 .borrow()
                 .iter()
-                .map(|(k, val)| format!("{}{}: {}", pad, json_string(k), json_encode(val, pretty, indent + 1)))
+                .map(|(k, val)| {
+                    format!(
+                        "{}{}: {}",
+                        pad,
+                        json_string(k),
+                        json_encode(val, pretty, indent + 1)
+                    )
+                })
                 .collect();
             format!("{{{}{}{}{}}}", nl, items.join(sep), nl, pad_end)
         }
@@ -2254,9 +2550,13 @@ fn json_number(c: &[char], i: &mut usize) -> std::result::Result<Value, String> 
         return Err("invalid JSON value".into());
     }
     if is_float {
-        text.parse::<f64>().map(Value::Float).map_err(|_| "invalid number".into())
+        text.parse::<f64>()
+            .map(Value::Float)
+            .map_err(|_| "invalid number".into())
     } else {
-        text.parse::<i64>().map(Value::Int).map_err(|_| "invalid number".into())
+        text.parse::<i64>()
+            .map(Value::Int)
+            .map_err(|_| "invalid number".into())
     }
 }
 
@@ -2279,9 +2579,16 @@ fn format_value(v: &Value, spec: Option<&str>, _pos: Pos) -> R<String> {
     if spec.ends_with('x') || spec.ends_with('X') {
         if let Value::Int(n) = v {
             let upper = spec.ends_with('X');
-            let width: usize = spec[..spec.len() - 1].trim_start_matches('0').parse().unwrap_or(0);
+            let width: usize = spec[..spec.len() - 1]
+                .trim_start_matches('0')
+                .parse()
+                .unwrap_or(0);
             let zero = spec[..spec.len() - 1].starts_with('0');
-            let body = if upper { format!("{:X}", n) } else { format!("{:x}", n) };
+            let body = if upper {
+                format!("{:X}", n)
+            } else {
+                format!("{:x}", n)
+            };
             if zero && body.len() < width {
                 return Ok(format!("{}{}", "0".repeat(width - body.len()), body));
             }
