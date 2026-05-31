@@ -29,20 +29,20 @@ cargo run -- run examples/cli_args.la3 -- alice bob carol
 
 The [`examples/`](examples/) directory has runnable programs:
 
-| File | Shows |
-| ---- | ----- |
-| `fib.la3` | recursion, `if` as an expression, ranges |
-| `shapes.la3` | structs, `impl`, enums with data, exhaustive `match` |
-| `options.la3` | `Option`, `Result`, the `?` operator, `??` |
+| File              | Shows                                                |
+| ----------------- | ---------------------------------------------------- |
+| `fib.la3`         | recursion, `if` as an expression, ranges             |
+| `shapes.la3`      | structs, `impl`, enums with data, exhaustive `match` |
+| `options.la3`     | `Option`, `Result`, the `?` operator, `??`           |
 | `collections.la3` | lists, closures, `map`/`filter`/`reduce`, maps, sets |
-| `fizzbuzz.la3` | tuple `match`, `loop { break value }` |
-| `tls_record.la3` | the reference manual's TLS encode/decode example |
-| `json.la3` | `json.encode` / `json.decode` / `json.pretty` |
-| `file_read.la3` | `fs.read` returning `Result<str>` |
-| `cli_args.la3` | `os.args()`, `os.env()` |
-| `word_count.la3` | file read, tokenize, count, `sort_by` |
-| `http_server.la3` | an in-process router over modeled requests |
-| `channels.la3` | channels, `spawn`/`join`, `await all`/`race` |
+| `fizzbuzz.la3`    | tuple `match`, `loop { break value }`                |
+| `tls_record.la3`  | the reference manual's TLS encode/decode example     |
+| `json.la3`        | `json.encode` / `json.decode` / `json.pretty`        |
+| `file_read.la3`   | `fs.read` returning `Result<str>`                    |
+| `cli_args.la3`    | `os.args()`, `os.env()`                              |
+| `word_count.la3`  | file read, tokenize, count, `sort_by`                |
+| `http_server.la3` | an in-process router over modeled requests           |
+| `channels.la3`    | channels, `spawn`/`join`, `await all`/`race`         |
 
 ```bash
 cargo run -- run examples/shapes.la3

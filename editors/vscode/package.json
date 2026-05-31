@@ -1,8 +1,8 @@
 {
   "name": "la3-language",
   "displayName": "La3 (Laila Lang)",
-  "description": "Syntax highlighting and editing support for Laila Lang (La3).",
-  "version": "0.1.0",
+  "description": "Syntax highlighting, live diagnostics, and run/build commands for Laila Lang (La3).",
+  "version": "0.2.0",
   "publisher": "glazastov",
   "license": "MIT",
   "repository": {
@@ -13,8 +13,20 @@
     "vscode": "^1.75.0"
   },
   "categories": [
-    "Programming Languages"
+    "Programming Languages",
+    "Linters"
   ],
+  "main": "./out/extension.js",
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "tsc -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^5.4.0"
+  },
   "contributes": {
     "languages": [
       {
@@ -36,6 +48,53 @@
         "scopeName": "source.la3",
         "path": "./syntaxes/la3.tmLanguage.json"
       }
-    ]
+    ],
+    "commands": [
+      {
+        "command": "la3.check",
+        "title": "La3: Check current file",
+        "category": "La3"
+      },
+      {
+        "command": "la3.run",
+        "title": "La3: Run current file",
+        "category": "La3"
+      },
+      {
+        "command": "la3.build",
+        "title": "La3: Build interpreter (cargo build --release)",
+        "category": "La3"
+      }
+    ],
+    "configuration": {
+      "title": "La3",
+      "properties": {
+        "la3.path": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path to the `la3` binary. When empty, the extension looks for `target/release/la3` then `target/debug/la3` under the workspace, and finally `la3` on your `PATH`."
+        },
+        "la3.diagnostics.run": {
+          "type": "string",
+          "enum": [
+            "onType",
+            "onSave",
+            "off"
+          ],
+          "default": "onType",
+          "enumDescriptions": [
+            "Re-check the file as you type (debounced).",
+            "Re-check only when the file is saved.",
+            "Disable live diagnostics."
+          ],
+          "description": "When to run `la3 check` for diagnostics."
+        },
+        "la3.diagnostics.debounce": {
+          "type": "number",
+          "default": 350,
+          "description": "Milliseconds to wait after the last keystroke before re-checking (onType mode)."
+        }
+      }
+    }
   }
 }

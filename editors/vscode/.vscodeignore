@@ -2,5 +2,10 @@
 .gitignore
 **/*.vsix
 node_modules/**
-bun.lockb
 bun.lock
+bun.lockb
+package-lock.json
+src/**
+tsconfig.json
+out/**/*.map
+**/*.ts
