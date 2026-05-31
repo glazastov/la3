@@ -18,6 +18,7 @@ la3 check  <file.la3>    # parse and report undefined-name and type errors
 la3 ast    <file.la3>    # parse and print the AST
 la3 tokens <file.la3>    # print the token stream
 la3 types  <file.la3>    # print the inferred type of every expression
+la3 layout <file.la3>    # print the by-value byte layout of structs and enums
 la3 build  <file.la3>    # compile to a native binary (WIP — see COMPILER_PLAN.md)
 ```
 
@@ -59,7 +60,7 @@ cargo run -- run examples/shapes.la3
 
 ## Native compiler (in progress)
 
-A real LLVM back-end is being built on top of the front-end; see [COMPILER_PLAN.md](COMPILER_PLAN.md) for the phased roadmap and status. The pipeline target is `AST → sound type check → HIR → MIR → LLVM IR → object → link runtime`, with heap memory managed by ARC. The workspace now includes a [`runtime/`](runtime/) crate (the native runtime compiled programs will link against). As of Phase 1, the type checker annotates every expression node with a concrete type (`la3 types`), which the back-end will consume.
+A real LLVM back-end is being built on top of the front-end; see [COMPILER_PLAN.md](COMPILER_PLAN.md) for the phased roadmap and status. The pipeline target is `AST → sound type check → HIR → MIR → LLVM IR → object → link runtime`, with heap memory managed by ARC. The workspace now includes a [`runtime/`](runtime/) crate (the native runtime compiled programs will link against). As of Phase 1, the type checker annotates every expression node with a concrete type (`la3 types`) and computes the by-value memory layout of structs and enums (`la3 layout`) — both consumed by the back-end.
 
 ## Deliberate deviations from the spec
 

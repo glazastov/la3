@@ -6,6 +6,7 @@
 //!   la3 ast   <file.la3>   parse and print the AST
 //!   la3 tokens <file.la3>  print the token stream (debugging)
 //!   la3 types <file.la3>   print the inferred type of every expression (debugging)
+//!   la3 layout <file.la3>  print the by-value byte layout of structs and enums (debugging)
 //!   la3 build <file.la3>   compile to a native binary (WIP, see COMPILER_PLAN.md)
 
 mod ast;
@@ -21,7 +22,7 @@ use std::process::exit;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        eprintln!("usage: la3 <run|check|build|ast|tokens|types> <file.la3>");
+        eprintln!("usage: la3 <run|check|build|ast|tokens|types|layout> <file.la3>");
         exit(2);
     }
     let cmd = args[1].as_str();
@@ -58,6 +59,23 @@ fn main() {
                     eprintln!("{}\n", d.render(path, &src));
                 }
                 eprintln!("{} type error(s)", table.errors.len());
+                exit(1);
+            }
+        }
+        "layout" => {
+            // Debug view: the by-value byte layout of every concrete struct and
+            // enum (Phase 1.3). This is what the back-end lays out in memory.
+            let prog = match parser::parse(&src) {
+                Ok(p) => p,
+                Err(d) => fail(&d, path, &src),
+            };
+            let layouts = typeck::dump_layouts(&prog);
+            print!("{}", layouts.dump());
+            if !layouts.errors.is_empty() {
+                for d in &layouts.errors {
+                    eprintln!("{}\n", d.render(path, &src));
+                }
+                eprintln!("{} type error(s)", layouts.errors.len());
                 exit(1);
             }
         }

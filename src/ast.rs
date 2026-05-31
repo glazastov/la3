@@ -96,8 +96,10 @@ pub struct EnumVariant {
 #[derive(Clone, Debug)]
 pub enum VariantKind {
     Unit,
-    Tuple(usize),
-    Struct(Vec<String>),
+    /// Positional payload, e.g. `V4(u8, u8, u8, u8)` — one `TypeExpr` per field.
+    Tuple(Vec<TypeExpr>),
+    /// Named payload, e.g. `Rect { width: f64, height: f64 }`.
+    Struct(Vec<(String, TypeExpr)>),
 }
 
 #[derive(Clone, Debug)]

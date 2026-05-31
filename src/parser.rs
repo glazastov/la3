@@ -520,28 +520,28 @@ impl Parser {
         while !self.at(&Tok::RBrace) {
             let vname = self.ident()?;
             let kind = if self.eat(&Tok::LParen) {
-                let mut n = 0;
+                let mut tys = Vec::new();
                 while !self.at(&Tok::RParen) {
-                    self.parse_type()?;
-                    n += 1;
+                    tys.push(self.parse_type()?);
                     if !self.eat(&Tok::Comma) {
                         break;
                     }
                 }
                 self.expect(&Tok::RParen, "')'")?;
-                VariantKind::Tuple(n)
+                VariantKind::Tuple(tys)
             } else if self.eat(&Tok::LBrace) {
-                let mut names = Vec::new();
+                let mut fields = Vec::new();
                 while !self.at(&Tok::RBrace) {
-                    names.push(self.ident()?);
+                    let fname = self.ident()?;
                     self.expect(&Tok::Colon, "':'")?;
-                    self.parse_type()?;
+                    let fty = self.parse_type()?;
+                    fields.push((fname, fty));
                     if !self.eat(&Tok::Comma) {
                         break;
                     }
                 }
                 self.expect(&Tok::RBrace, "'}'")?;
-                VariantKind::Struct(names)
+                VariantKind::Struct(fields)
             } else {
                 VariantKind::Unit
             };
