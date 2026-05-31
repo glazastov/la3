@@ -1,3 +1,5 @@
 /target
 Cargo.lock
 *.swp
+*.vsix
+node_modules/

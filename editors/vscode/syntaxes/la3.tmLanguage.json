@@ -1,0 +1,251 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "La3",
+  "scopeName": "source.la3",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#item-definitions" },
+    { "include": "#keywords" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#types" },
+    { "include": "#constants" },
+    { "include": "#functions" },
+    { "include": "#operators" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.la3",
+          "begin": "//",
+          "end": "$"
+        },
+        {
+          "name": "comment.block.la3",
+          "begin": "/\\*",
+          "end": "\\*/",
+          "patterns": [{ "include": "#comments" }]
+        }
+      ]
+    },
+    "item-definitions": {
+      "patterns": [
+        {
+          "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.other.fn.la3" },
+            "2": { "name": "entity.name.function.la3" }
+          }
+        },
+        {
+          "match": "\\b(struct|enum|interface|impl|type)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.la3" },
+            "2": { "name": "entity.name.type.la3" }
+          }
+        },
+        {
+          "match": "\\b(mod|use)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.other.la3" },
+            "2": { "name": "entity.name.namespace.la3" }
+          }
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.la3",
+          "match": "\\b(if|else|match|loop|while|for|in|break|continue|return|try|await|spawn)\\b"
+        },
+        {
+          "name": "keyword.declaration.la3",
+          "match": "\\b(let|mut|const|fn|struct|enum|interface|impl|type)\\b"
+        },
+        {
+          "name": "keyword.other.la3",
+          "match": "\\b(mod|use|pub|async|move|unsafe|as)\\b"
+        },
+        {
+          "name": "variable.language.self.la3",
+          "match": "\\bself\\b"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.la3",
+          "match": "\\b(true|false|nil)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "support.type.primitive.la3",
+          "match": "\\b(i8|i16|i32|i64|isize|u8|u16|u32|u64|usize|f32|f64|byte|bool|str|char)\\b"
+        },
+        {
+          "name": "support.type.builtin.la3",
+          "match": "\\b(Option|Result|Some|None|Ok|Err)\\b"
+        },
+        {
+          "name": "entity.name.type.la3",
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "comment": "Standard-library modules used with dot access",
+          "match": "\\b(io|fs|os|json|math|bytes)\\b(?=\\s*\\.)",
+          "name": "support.class.module.la3"
+        },
+        {
+          "comment": "Free builtins documented in the README",
+          "name": "support.function.builtin.la3",
+          "match": "\\b(idiv|str|len|min|max|to_hex|from_hex)\\b(?=\\s*\\()"
+        },
+        {
+          "comment": "Method / function calls",
+          "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\b(?=\\s*\\()",
+          "name": "entity.name.function.call.la3"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.interpolated.la3",
+          "begin": "f\"",
+          "end": "\"",
+          "patterns": [
+            { "include": "#string-escape" },
+            {
+              "name": "meta.interpolation.la3",
+              "begin": "\\{",
+              "end": "\\}",
+              "beginCaptures": {
+                "0": { "name": "punctuation.section.interpolation.begin.la3" }
+              },
+              "endCaptures": {
+                "0": { "name": "punctuation.section.interpolation.end.la3" }
+              },
+              "patterns": [
+                {
+                  "name": "constant.other.format-spec.la3",
+                  "match": ":[^{}\"]*"
+                },
+                { "include": "#numbers" },
+                { "include": "#operators" },
+                {
+                  "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\b(?=\\s*\\()",
+                  "name": "entity.name.function.call.la3"
+                },
+                {
+                  "name": "variable.other.la3",
+                  "match": "[A-Za-z_][A-Za-z0-9_]*"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.double.la3",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [{ "include": "#string-escape" }]
+        },
+        {
+          "name": "string.quoted.single.la3",
+          "match": "'(\\\\.|[^'\\\\])'"
+        }
+      ]
+    },
+    "string-escape": {
+      "name": "constant.character.escape.la3",
+      "match": "\\\\(n|t|r|0|\\\\|'|\"|.)"
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.la3",
+          "match": "\\b0x[0-9A-Fa-f_]+(u8|u16|u32|u64|usize|i8|i16|i32|i64|isize|f32|f64|byte)?\\b"
+        },
+        {
+          "name": "constant.numeric.octal.la3",
+          "match": "\\b0o[0-7_]+(u8|u16|u32|u64|usize|i8|i16|i32|i64|isize|byte)?\\b"
+        },
+        {
+          "name": "constant.numeric.binary.la3",
+          "match": "\\b0b[01_]+(u8|u16|u32|u64|usize|i8|i16|i32|i64|isize|byte)?\\b"
+        },
+        {
+          "name": "constant.numeric.float.la3",
+          "match": "\\b[0-9][0-9_]*(\\.[0-9][0-9_]*)?([eE][+-]?[0-9_]+)?(f32|f64)?\\b"
+        },
+        {
+          "name": "constant.numeric.integer.la3",
+          "match": "\\b[0-9][0-9_]*(u8|u16|u32|u64|usize|i8|i16|i32|i64|isize|byte)?\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.range.la3",
+          "match": "\\.\\.=?"
+        },
+        {
+          "name": "keyword.operator.optional.la3",
+          "match": "\\?\\?|\\?\\.|\\?"
+        },
+        {
+          "name": "keyword.operator.arrow.la3",
+          "match": "->|=>"
+        },
+        {
+          "name": "keyword.operator.assignment.la3",
+          "match": "\\+=|-=|\\*=|/=|%=|="
+        },
+        {
+          "name": "keyword.operator.comparison.la3",
+          "match": "==|!=|<=|>=|<|>"
+        },
+        {
+          "name": "keyword.operator.logical.la3",
+          "match": "&&|\\|\\||!"
+        },
+        {
+          "name": "keyword.operator.bitwise.la3",
+          "match": "<<|>>|&|\\||\\^|~"
+        },
+        {
+          "name": "keyword.operator.arithmetic.la3",
+          "match": "\\*\\*|\\+|-|\\*|/|%"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.accessor.la3",
+          "match": "::|\\."
+        },
+        {
+          "name": "punctuation.separator.la3",
+          "match": "[,;:@]"
+        },
+        {
+          "name": "punctuation.brackets.la3",
+          "match": "[(){}\\[\\]]"
+        }
+      ]
+    }
+  }
+}

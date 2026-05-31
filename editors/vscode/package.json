@@ -1,0 +1,41 @@
+{
+  "name": "la3-language",
+  "displayName": "La3 (Laila Lang)",
+  "description": "Syntax highlighting and editing support for Laila Lang (La3).",
+  "version": "0.1.0",
+  "publisher": "glazastov",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/glazastov/la3"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "la3",
+        "aliases": [
+          "La3",
+          "Laila Lang",
+          "la3"
+        ],
+        "extensions": [
+          ".la3"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "la3",
+        "scopeName": "source.la3",
+        "path": "./syntaxes/la3.tmLanguage.json"
+      }
+    ]
+  }
+}
