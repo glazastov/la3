@@ -1,8 +1,8 @@
 # La3
 
-A lexer, parser, checker, and tree-walking interpreter for **Laila Lang (La3)**, the reading pseudo-language documented at [glazastov.com](https://glazastov.com). La3 borrows the clearest parts of Rust, C, TypeScript, and Lua to make code examples readable regardless of which real language you know best.
+A lexer, parser, checker, tree-walking interpreter, and **(in progress) LLVM compiler** for **Laila Lang (La3)**, the reading pseudo-language documented at [glazastov.com](https://glazastov.com). La3 borrows the clearest parts of Rust, C, TypeScript, and Lua to make code examples readable regardless of which real language you know best.
 
-This implementation is written in Rust with **no external dependencies** (only the standard library).
+The interpreter is written in Rust with no external dependencies. The native compiler is being built on top of it — the interpreter stays as the correctness oracle. The roadmap and live progress are in [COMPILER_PLAN.md](COMPILER_PLAN.md).
 
 ## Build
 
@@ -14,9 +14,11 @@ cargo build --release
 
 ```bash
 la3 run    <file.la3>    # parse, check, and execute (calls `main`)
-la3 check  <file.la3>    # parse and report undefined-name errors
+la3 check  <file.la3>    # parse and report undefined-name and type errors
 la3 ast    <file.la3>    # parse and print the AST
 la3 tokens <file.la3>    # print the token stream
+la3 types  <file.la3>    # print the inferred type of every expression
+la3 build  <file.la3>    # compile to a native binary (WIP — see COMPILER_PLAN.md)
 ```
 
 Arguments after the file are passed to the program and read with `os.args()`:
@@ -54,6 +56,10 @@ cargo run -- run examples/shapes.la3
 - **Parser**: items (`fn`, `struct`, `enum`, `impl`, `interface`, `const`, `type`, `use`, `mod`), a Pratt expression parser, patterns, and optional semicolons via significant-newline filtering.
 - **Checker**: name resolution (reports undefined names) followed by a static **type checker** covering reference Sections 2, 4, 7, and 9 — type inference for `let`/`const`, the `i32`/`f64` literal defaults, no implicit numeric conversion (an `as` cast is required), the `nil` / `Option<T>` identity, operator typing (`**` yields `f64`, comparison/logical yield `bool`, bitwise needs integers, `??`/`?.` on `T | nil`), `if`/`match` arm agreement, `match` exhaustiveness, the `?`-operator context rule, struct-literal field checking, and nominal interface conformance for generic bounds (`T: Iface` needs an explicit `impl`).
 - **Interpreter**: immutable-by-default bindings, closures, recursion, generics (erased), `match` with guards/ranges/bindings, `if`/`while`/`while let`/`for`/`loop`, structs and methods, enums with data, `Option`/`Result` with `?`, tuples, lists, maps, sets, ranges, f-strings with format specs, **concurrency** (channels with `send`/`recv`/`close`/iteration, `spawn`/`join`, and `await all`/`race` over a cooperative scheduler), and a standard-library subset (`io`, `fs`, `os`, `json`, `math`, `bytes`, free `str`/`len`/`min`/`max`/`to_hex`/`from_hex`).
+
+## Native compiler (in progress)
+
+A real LLVM back-end is being built on top of the front-end; see [COMPILER_PLAN.md](COMPILER_PLAN.md) for the phased roadmap and status. The pipeline target is `AST → sound type check → HIR → MIR → LLVM IR → object → link runtime`, with heap memory managed by ARC. The workspace now includes a [`runtime/`](runtime/) crate (the native runtime compiled programs will link against). As of Phase 1, the type checker annotates every expression node with a concrete type (`la3 types`), which the back-end will consume.
 
 ## Deliberate deviations from the spec
 

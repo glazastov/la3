@@ -13,6 +13,21 @@
 
 use crate::diag::Pos;
 
+/// A stable identifier for an [`Expr`] node, unique within a [`Program`].
+///
+/// `Pos` is not unique per node (a binary expression shares its start position
+/// with its left-most operand), so the type checker keys its type table on
+/// `NodeId` instead. Ids are assigned by [`Program::assign_ids`] in a single
+/// post-parse walk; until then nodes carry [`NodeId::DUMMY`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct NodeId(pub u32);
+
+impl NodeId {
+    /// The id every freshly parsed node carries before [`Program::assign_ids`]
+    /// numbers the tree.
+    pub const DUMMY: NodeId = NodeId(u32::MAX);
+}
+
 #[derive(Clone, Debug)]
 pub struct Program {
     pub items: Vec<Item>,
@@ -139,6 +154,9 @@ pub enum Stmt {
 pub struct Expr {
     pub kind: ExprKind,
     pub pos: Pos,
+    /// Unique within the program; assigned by [`Program::assign_ids`]. Keys the
+    /// type checker's type table. [`NodeId::DUMMY`] until numbered.
+    pub id: NodeId,
 }
 
 #[derive(Clone, Debug)]
@@ -396,4 +414,171 @@ pub enum TypeExpr {
     Async(Box<TypeExpr>),
     Unit,
     Never,
+}
+
+// ---------------------------------------------------------------------------
+// Node numbering
+// ---------------------------------------------------------------------------
+
+impl Program {
+    /// Walk the whole tree once and give every [`Expr`] a unique [`NodeId`], so
+    /// later passes (the type checker, HIR lowering) can key side tables on the
+    /// node rather than on a non-unique [`Pos`]. Called by `parser::parse` right
+    /// after building the AST, so any `Program` handed downstream is numbered.
+    pub fn assign_ids(&mut self) {
+        let mut n: u32 = 0;
+        for item in &mut self.items {
+            number_item(item, &mut n);
+        }
+    }
+}
+
+fn number_item(item: &mut Item, n: &mut u32) {
+    match item {
+        Item::Fn(f) => number_block(&mut f.body, n),
+        Item::Const(c) => number_expr(&mut c.value, n),
+        Item::Impl(b) => {
+            for m in &mut b.methods {
+                number_block(&mut m.body, n);
+            }
+        }
+        // No embedded expressions.
+        Item::Struct(_) | Item::Enum(_) | Item::Use(_) | Item::TypeAlias { .. }
+        | Item::Interface(_) => {}
+    }
+}
+
+fn number_block(b: &mut Block, n: &mut u32) {
+    for s in &mut b.stmts {
+        number_stmt(s, n);
+    }
+    if let Some(tail) = &mut b.tail {
+        number_expr(tail, n);
+    }
+}
+
+fn number_stmt(s: &mut Stmt, n: &mut u32) {
+    match s {
+        Stmt::Let { value, .. } => number_expr(value, n),
+        Stmt::Expr(e) => number_expr(e, n),
+        Stmt::Return(Some(e), _) | Stmt::Break(Some(e), _) => number_expr(e, n),
+        Stmt::Return(None, _) | Stmt::Break(None, _) | Stmt::Continue(_) => {}
+        Stmt::Item(item) => number_item(item, n),
+    }
+}
+
+fn number_expr(e: &mut Expr, n: &mut u32) {
+    e.id = NodeId(*n);
+    *n += 1;
+    match &mut e.kind {
+        // Leaves.
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Char(_)
+        | ExprKind::Bool(_) | ExprKind::Nil | ExprKind::Ident(_) | ExprKind::SelfExpr
+        | ExprKind::Path(_) => {}
+
+        ExprKind::FStr(parts) => {
+            for p in parts {
+                if let FStrPart::Expr { expr, .. } = p {
+                    number_expr(expr, n);
+                }
+            }
+        }
+        ExprKind::Unary { expr, .. } => number_expr(expr, n),
+        ExprKind::Binary { lhs, rhs, .. } | ExprKind::Coalesce { lhs, rhs } => {
+            number_expr(lhs, n);
+            number_expr(rhs, n);
+        }
+        ExprKind::Assign { target, value, .. } => {
+            number_expr(target, n);
+            number_expr(value, n);
+        }
+        ExprKind::Cast { expr, .. } => number_expr(expr, n),
+        ExprKind::Call { callee, args } => {
+            number_expr(callee, n);
+            for a in args {
+                number_expr(a, n);
+            }
+        }
+        ExprKind::MethodCall { recv, args, .. } => {
+            number_expr(recv, n);
+            for a in args {
+                number_expr(a, n);
+            }
+        }
+        ExprKind::Field { recv, .. } => number_expr(recv, n),
+        ExprKind::Index { recv, index } => {
+            number_expr(recv, n);
+            number_expr(index, n);
+        }
+        ExprKind::Tuple(xs) | ExprKind::List(xs) | ExprKind::Set(xs) => {
+            for x in xs {
+                number_expr(x, n);
+            }
+        }
+        ExprKind::ListRepeat { value, count } => {
+            number_expr(value, n);
+            number_expr(count, n);
+        }
+        ExprKind::Map(pairs) => {
+            for (k, v) in pairs {
+                number_expr(k, n);
+                number_expr(v, n);
+            }
+        }
+        ExprKind::StructLit { fields, spread, .. } => {
+            for (_, v) in fields {
+                number_expr(v, n);
+            }
+            if let Some(s) = spread {
+                number_expr(s, n);
+            }
+        }
+        ExprKind::Block(b) => number_block(b, n),
+        ExprKind::If { cond, then, els } => {
+            number_expr(cond, n);
+            number_block(then, n);
+            if let Some(e) = els {
+                number_expr(e, n);
+            }
+        }
+        ExprKind::Match { scrutinee, arms } => {
+            number_expr(scrutinee, n);
+            for arm in arms {
+                if let Some(g) = &mut arm.guard {
+                    number_expr(g, n);
+                }
+                number_expr(&mut arm.body, n);
+            }
+        }
+        ExprKind::Loop { body } | ExprKind::Spawn(body) | ExprKind::Unsafe(body) => {
+            number_block(body, n)
+        }
+        ExprKind::While { cond, body } => {
+            number_expr(cond, n);
+            number_block(body, n);
+        }
+        ExprKind::WhileLet { expr, body, .. } => {
+            number_expr(expr, n);
+            number_block(body, n);
+        }
+        ExprKind::For { iter, body, .. } => {
+            number_expr(iter, n);
+            number_block(body, n);
+        }
+        ExprKind::Range { start, end, .. } => {
+            number_expr(start, n);
+            number_expr(end, n);
+        }
+        ExprKind::Closure { body, .. } => number_expr(body, n),
+        ExprKind::Try(e) | ExprKind::Await(e) => number_expr(e, n),
+        ExprKind::TryCatch { body, catches, finally } => {
+            number_block(body, n);
+            for c in catches {
+                number_block(&mut c.body, n);
+            }
+            if let Some(f) = finally {
+                number_block(f, n);
+            }
+        }
+    }
 }

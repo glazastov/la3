@@ -29,6 +29,28 @@ fn all_examples_run() {
     }
 }
 
+/// `la3 types` must type every bundled example without error and emit at least
+/// one `line:col  <type>` annotation per file (Phase 1.1: the expression type
+/// table). This exercises NodeId numbering and the type table end to end.
+#[test]
+fn types_command_annotates_all_examples() {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/examples");
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("la3") {
+            continue;
+        }
+        let p = path.to_str().unwrap();
+        let (out, err, ok) = run(&["types", p]);
+        assert!(ok, "types failed for {}:\n{}", p, err);
+        assert!(
+            out.lines().any(|l| l.trim().contains(char::is_alphabetic)),
+            "types produced no annotations for {}",
+            p
+        );
+    }
+}
+
 #[test]
 fn fib_output_is_correct() {
     let p = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/fib.la3");

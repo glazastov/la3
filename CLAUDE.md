@@ -11,6 +11,8 @@ real **LLVM compiler** on top of it. The roadmap and live progress live in
 2. Work **one subpart at a time**.
 3. After each subpart: **build → test → verify**, then tick its checkbox in the plan.
 4. When a whole phase is done: update its `STATUS`, add a line to the Progress log, and **stop for the user to review**. Do not start the next phase unprompted.
+5. **Always consult the language reference** ([laila-lang-reference.md](laila-lang-reference.md)) for the authoritative semantics before implementing a feature.
+6. **Always keep [README.md](README.md) up to date** as user-facing behavior, commands, or implemented features change.
 
 ## Toolchain (important)
 

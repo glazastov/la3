@@ -57,11 +57,11 @@ full borrow checker, real `net`/`crypto`. `Result`/`Option`/`?` land early (just
 - [x] 0.5 Differential test harness ([tests/differential.rs](tests/differential.rs)) — interp × future binary, auto-skips while codegen pending
 - [x] 0.6 Document LLVM env/ABI (`LLVM_SYS_181_PREFIX=/usr/lib/llvm-18`) in `CLAUDE.md`
 
-## Phase 1 — Sound type checker · STATUS: [ ]
+## Phase 1 — Sound type checker · STATUS: [~] in progress
 
 Prerequisite for everything. The light `typeck` becomes the source of truth.
 
-- [ ] 1.1 Annotate **every AST node** with a concrete `Ty` (type table keyed by node)
+- [x] 1.1 Annotate **every AST node** with a concrete `Ty` — `NodeId` on `Expr` ([ast.rs](src/ast.rs)), `Program::assign_ids`, `typeck::check_types` → `TypeTable`, debug `la3 types`
 - [ ] 1.2 Full field & method resolution (struct/enum/builtin) → error if unresolved
 - [ ] 1.3 _Layout_ computation: structs, **tagged unions** for enums (incl. `Option`/`Result`), tuples, `[T;N]`
 - [ ] 1.4 Exact `as` semantics: truncation, sign, `**`→`f64`, `//` floor, `/` trunc-toward-zero
@@ -130,3 +130,4 @@ Prerequisite for everything. The light `typeck` becomes the source of truth.
 
 - 2026-05-31 — Plan created. Toolchain: rustup stable 1.94 (system 1.75 ignored). LLVM 18 at `/usr/lib/llvm-18`. Starting Phase 0.
 - 2026-05-31 — **Phase 0 complete.** Removed the conflicting Ubuntu system Rust 1.75 (`apt`), so plain `cargo` is now rustup `stable` 1.96 (edition 2024). Added `runtime/` crate, `la3 build` stub, and the differential harness (13 examples, all skipped pending codegen). `cargo test --workspace`: 33 + 2 pass. Awaiting review before Phase 1.
+- 2026-05-31 — **Phase 1.1 done.** Added `NodeId` to `Expr`, numbered by `Program::assign_ids` (called in `parser::parse`). Type checker now records a concrete `Ty` per node into a `TypeTable` (`typeck::check_types`); new `la3 types` command dumps it. Tests: 53 pass (added `types_command_annotates_all_examples`).

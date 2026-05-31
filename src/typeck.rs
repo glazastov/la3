@@ -32,6 +32,58 @@ pub fn check(prog: &Program) -> Vec<Diagnostic> {
     tc.errors
 }
 
+/// The type checker's full product: the diagnostics plus a concrete type for
+/// every expression node, keyed by [`NodeId`]. The compiler back-end consumes
+/// the table; `la3 types` dumps it. The program must already be numbered
+/// (`Program::assign_ids`, done by `parser::parse`).
+pub struct TypeTable {
+    map: HashMap<NodeId, Ty>,
+    order: Vec<(Pos, NodeId)>,
+    pub errors: Vec<Diagnostic>,
+}
+
+impl TypeTable {
+    /// The inferred type of a node, rendered as written in source (e.g. `i32`,
+    /// `List<str>`, `Option<i32>`). `None` if the node was never typed.
+    pub fn type_of(&self, id: NodeId) -> Option<String> {
+        self.map.get(&id).map(display_ty)
+    }
+
+    /// Number of typed expression nodes. Used by the back-end (Phase 4+).
+    #[allow(dead_code)]
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    /// One `line:col  <type>` line per expression, in source order, for the
+    /// `la3 types` debugging command.
+    pub fn dump(&self) -> String {
+        let mut out = String::new();
+        for (pos, id) in &self.order {
+            if let Some(t) = self.type_of(*id) {
+                out.push_str(&format!("{:>4}:{:<3} {}\n", pos.line, pos.col, t));
+            }
+        }
+        out
+    }
+}
+
+/// Run the type checker and return the full [`TypeTable`] (types + errors).
+pub fn check_types(prog: &Program) -> TypeTable {
+    let mut tc = TypeChecker::new(prog);
+    tc.run(prog);
+    TypeTable {
+        map: tc.types,
+        order: tc.type_order,
+        errors: tc.errors,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -265,6 +317,13 @@ struct TypeChecker {
     /// `break` value types for each enclosing `loop`.
     loop_breaks: Vec<Vec<Ty>>,
 
+    /// Inferred type of every expression, keyed by [`NodeId`]. This is the
+    /// product the compiler back-end consumes; the interpreter ignores it.
+    types: HashMap<NodeId, Ty>,
+    /// `(pos, id)` in the order expressions were inferred, so a dump can print
+    /// the table in roughly source order without re-walking the tree.
+    type_order: Vec<(Pos, NodeId)>,
+
     errors: Vec<Diagnostic>,
 }
 
@@ -293,6 +352,8 @@ impl TypeChecker {
             ret_stack: Vec::new(),
             loop_breaks: Vec::new(),
             unsafe_depth: 0,
+            types: HashMap::new(),
+            type_order: Vec::new(),
             errors: Vec::new(),
         };
         tc.collect(prog);
@@ -758,7 +819,17 @@ impl TypeChecker {
 
     // ---- expression inference -------------------------------------------
 
+    /// Infer the type of an expression and record it in the type table keyed by
+    /// the node's [`NodeId`]. Every expression flows through here, so the table
+    /// ends up holding a concrete `Ty` for every node in the program.
     fn infer(&mut self, e: &Expr) -> Ty {
+        let ty = self.infer_kind(e);
+        self.types.insert(e.id, ty.clone());
+        self.type_order.push((e.pos, e.id));
+        ty
+    }
+
+    fn infer_kind(&mut self, e: &Expr) -> Ty {
         match &e.kind {
             ExprKind::Int(_) => Ty::IntLit,
             ExprKind::Float(_) => Ty::FloatLit,

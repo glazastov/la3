@@ -5,6 +5,7 @@
 //!   la3 check <file.la3>   parse and report undefined-name errors
 //!   la3 ast   <file.la3>   parse and print the AST
 //!   la3 tokens <file.la3>  print the token stream (debugging)
+//!   la3 types <file.la3>   print the inferred type of every expression (debugging)
 //!   la3 build <file.la3>   compile to a native binary (WIP, see COMPILER_PLAN.md)
 
 mod ast;
@@ -20,7 +21,7 @@ use std::process::exit;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        eprintln!("usage: la3 <run|check|build|ast|tokens> <file.la3>");
+        eprintln!("usage: la3 <run|check|build|ast|tokens|types> <file.la3>");
         exit(2);
     }
     let cmd = args[1].as_str();
@@ -43,6 +44,23 @@ fn main() {
             Ok(prog) => println!("{:#?}", prog),
             Err(d) => fail(&d, path, &src),
         },
+        "types" => {
+            // Debug view: the inferred type of every expression node. Surfaces
+            // the type table the compiler back-end will consume (Phase 1.1).
+            let prog = match parser::parse(&src) {
+                Ok(p) => p,
+                Err(d) => fail(&d, path, &src),
+            };
+            let table = typeck::check_types(&prog);
+            print!("{}", table.dump());
+            if !table.errors.is_empty() {
+                for d in &table.errors {
+                    eprintln!("{}\n", d.render(path, &src));
+                }
+                eprintln!("{} type error(s)", table.errors.len());
+                exit(1);
+            }
+        }
         "check" => {
             let prog = match parser::parse(&src) {
                 Ok(p) => p,
