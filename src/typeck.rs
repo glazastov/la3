@@ -259,6 +259,9 @@ struct TypeChecker {
     type_params: HashSet<String>,
     /// Return type of the function currently being checked.
     ret_stack: Vec<Ty>,
+    /// Nesting depth of `unsafe` blocks; raw-pointer dereference is only allowed
+    /// while this is greater than zero (reference Section 11).
+    unsafe_depth: u32,
     /// `break` value types for each enclosing `loop`.
     loop_breaks: Vec<Vec<Ty>>,
 
@@ -289,6 +292,7 @@ impl TypeChecker {
             type_params: HashSet::new(),
             ret_stack: Vec::new(),
             loop_breaks: Vec::new(),
+            unsafe_depth: 0,
             errors: Vec::new(),
         };
         tc.collect(prog);
@@ -911,7 +915,12 @@ impl TypeChecker {
                 let t = self.check_block(body);
                 Ty::Future(Box::new(t))
             }
-            ExprKind::Unsafe(body) => self.check_block(body),
+            ExprKind::Unsafe(body) => {
+                self.unsafe_depth += 1;
+                let t = self.check_block(body);
+                self.unsafe_depth -= 1;
+                t
+            }
             ExprKind::TryCatch {
                 body,
                 catches,
@@ -983,7 +992,17 @@ impl TypeChecker {
             UnOp::Ref | UnOp::RefMut => Ty::Ref(Box::new(t)),
             UnOp::RawRef => Ty::Ptr(Box::new(t)),
             UnOp::Deref => match t {
-                Ty::Ref(inner) | Ty::Ptr(inner) => *inner,
+                // Dereferencing a raw pointer is only allowed inside `unsafe`.
+                Ty::Ptr(inner) => {
+                    if self.unsafe_depth == 0 {
+                        self.err(
+                            pos,
+                            "dereferencing a raw pointer requires an `unsafe` block",
+                        );
+                    }
+                    *inner
+                }
+                Ty::Ref(inner) => *inner,
                 other => other,
             },
         }
@@ -993,6 +1012,16 @@ impl TypeChecker {
         let l = self.infer(lhs);
         let r = self.infer(rhs);
         use BinOp::*;
+        // Pointer arithmetic (Section 11): `p + n` / `p - n` stay pointers, and
+        // `p - q` is the element distance.
+        if matches!(op, Add | Sub) {
+            match (&l, &r) {
+                (Ty::Ptr(_), Ty::Ptr(_)) if matches!(op, Sub) => return Ty::Int(IntKind::Isize),
+                (Ty::Ptr(_), _) => return l,
+                (_, Ty::Ptr(_)) if matches!(op, Add) => return r,
+                _ => {}
+            }
+        }
         match op {
             Add | Sub | Mul | Div | Rem => {
                 // `+` also concatenates strings.
@@ -1069,7 +1098,37 @@ impl TypeChecker {
         join(&l.strip_nil(), &r)
     }
 
+    /// Aliasing xor mutability (Section 11): within a single call's argument
+    /// list a value may be borrowed by many `&T` or by exactly one `&mut T`,
+    /// never both. This is a conservative, intra-call check (it does not track
+    /// borrows across statements), so it never fires on borrow-free code.
+    fn check_borrow_conflicts(&mut self, args: &[Expr], pos: Pos) {
+        let mut roots: Vec<(String, bool)> = Vec::new();
+        for a in args {
+            if let Some(b) = borrow_root(a) {
+                roots.push(b);
+            }
+        }
+        let mut reported: HashSet<String> = HashSet::new();
+        for (name, mutable) in &roots {
+            if !mutable {
+                continue;
+            }
+            let others = roots.iter().filter(|(n, _)| n == name).count();
+            if others > 1 && reported.insert(name.clone()) {
+                self.err(
+                    pos,
+                    format!(
+                        "cannot borrow `{}` mutably while it is also borrowed in the same call (aliasing xor mutability)",
+                        name
+                    ),
+                );
+            }
+        }
+    }
+
     fn infer_call(&mut self, callee: &Expr, args: &[Expr], pos: Pos) -> Ty {
+        self.check_borrow_conflicts(args, pos);
         // Enum constructors carry their payload type.
         if let ExprKind::Ident(name) = &callee.kind {
             match name.as_str() {
@@ -1122,6 +1181,19 @@ impl TypeChecker {
                         self.infer(a);
                     }
                     return Ty::result(Ty::List(Box::new(Ty::Int(IntKind::U8))));
+                }
+                // Heap allocation (Section 11).
+                "alloc" => {
+                    for a in args {
+                        self.infer(a);
+                    }
+                    return Ty::Ptr(Box::new(Ty::Int(IntKind::U8)));
+                }
+                "dealloc" => {
+                    for a in args {
+                        self.infer(a);
+                    }
+                    return Ty::Unit;
                 }
                 _ => {}
             }
@@ -1231,6 +1303,7 @@ impl TypeChecker {
         args: &[Expr],
         _pos: Pos,
     ) -> Ty {
+        self.check_borrow_conflicts(args, _pos);
         // `module.fn(...)` (io, fs, os, math, json, bytes, crypto, net, ...).
         if let ExprKind::Ident(modname) = &recv.kind {
             if self.lookup(modname).is_none() && is_module(modname) {
@@ -1921,6 +1994,28 @@ fn wrap_optional(t: Ty, optional: bool) -> Ty {
         Ty::option(t)
     } else {
         t
+    }
+}
+
+/// If `e` is a borrow of a root variable (`&x`, `&mut x`, `&raw x`, `&arr[i]`),
+/// return `(variable name, is the borrow mutable)`.
+fn borrow_root(e: &Expr) -> Option<(String, bool)> {
+    let (op, inner) = match &e.kind {
+        ExprKind::Unary { op, expr } => (*op, expr),
+        _ => return None,
+    };
+    let mutable = matches!(op, UnOp::RefMut | UnOp::RawRef);
+    if !matches!(op, UnOp::Ref | UnOp::RefMut | UnOp::RawRef) {
+        return None;
+    }
+    // Peel index/field access down to the root identifier.
+    let mut cur = inner.as_ref();
+    loop {
+        match &cur.kind {
+            ExprKind::Ident(name) => return Some((name.clone(), mutable)),
+            ExprKind::Index { recv, .. } | ExprKind::Field { recv, .. } => cur = recv,
+            _ => return None,
+        }
     }
 }
 

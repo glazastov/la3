@@ -58,7 +58,24 @@ pub enum Value {
     /// time its result is needed (`join`, `await`, a blocked `recv`, or program
     /// shutdown); the result is then memoized.
     Future(Rc<TaskState>),
+    /// A safe reference (`&T` / `&mut T`): an alias to a variable's storage cell.
+    /// Reads and writes through it (`*r`, `*r = v`) reach the original binding.
+    Ref(Rc<RefCell<Value>>, bool),
+    /// A raw pointer (`*T` / `*mut T`): an element-addressed cursor into a
+    /// backing store, either an array/list or a heap region from `alloc`.
+    /// Arithmetic is scaled by element, so `*(p + n)` is the n-th element.
+    Ptr(Rc<PtrData>),
     Unit,
+}
+
+/// A raw pointer. Indexing is element-based, so `p + n` selects the element `n`
+/// steps along; `elem_size` records `sizeof(T)` for the byte-offset view the
+/// reference describes (`p + n` advances `n * sizeof(T)` bytes).
+pub struct PtrData {
+    store: Rc<RefCell<Vec<Value>>>,
+    index: i64,
+    elem_size: usize,
+    mutable: bool,
 }
 
 pub struct ClosureData {
@@ -102,6 +119,8 @@ impl Value {
             Value::Closure(_) | Value::Function(_) => "fn".into(),
             Value::Channel(_) => "Channel".into(),
             Value::Future(_) => "Future".into(),
+            Value::Ref(_, _) => "ref".into(),
+            Value::Ptr(_) => "ptr".into(),
             Value::Unit => "()".into(),
         }
     }
@@ -662,9 +681,17 @@ impl Interp {
     }
 
     fn eval_unary(&mut self, op: UnOp, expr: &Expr, env: &Env, pos: Pos) -> R<Value> {
-        // `&`, `&mut`, `&raw`, `*` are pass-through in this value-based interpreter.
         match op {
-            UnOp::Ref | UnOp::RefMut | UnOp::RawRef | UnOp::Deref => self.eval(expr, env),
+            // Safe references alias the referent's storage cell so writes are
+            // visible through the original binding (Section 11).
+            UnOp::Ref | UnOp::RefMut => self.eval_ref(expr, env, matches!(op, UnOp::RefMut), pos),
+            // `&raw` takes a raw pointer into an array/list slot or a boxed value.
+            UnOp::RawRef => self.eval_raw_ref(expr, env, pos),
+            // `*` reads through a safe reference or a raw pointer.
+            UnOp::Deref => {
+                let v = self.eval(expr, env)?;
+                self.deref(&v, pos)
+            }
             UnOp::Neg => match self.eval(expr, env)? {
                 Value::Int(n) => Ok(Value::Int(-n)),
                 Value::Float(f) => Ok(Value::Float(-f)),
@@ -678,6 +705,97 @@ impl Interp {
                 Value::Int(n) => Ok(Value::Int(!n)),
                 _ => rt(pos, "'~' expects an integer"),
             },
+        }
+    }
+
+    /// `&x` / `&mut x`: a safe reference. When the operand names a binding, the
+    /// reference shares that binding's cell so writes are visible through it;
+    /// otherwise the value is boxed in a fresh cell.
+    fn eval_ref(&mut self, expr: &Expr, env: &Env, mutable: bool, pos: Pos) -> R<Value> {
+        if let ExprKind::Ident(name) = &expr.kind {
+            if let Some(cell) = lookup(env, name) {
+                return Ok(Value::Ref(cell, mutable));
+            }
+        }
+        let v = self.eval(expr, env)?;
+        let _ = pos;
+        Ok(Value::Ref(Rc::new(RefCell::new(v)), mutable))
+    }
+
+    /// `&raw expr`: a raw pointer. Into an array/list slot when the operand is an
+    /// index expression (`&raw arr[i]`), otherwise into a one-element region
+    /// boxing the value.
+    fn eval_raw_ref(&mut self, expr: &Expr, env: &Env, pos: Pos) -> R<Value> {
+        if let ExprKind::Index { recv, index } = &expr.kind {
+            let base = self.eval(recv, env)?;
+            let idx = self.eval(index, env)?;
+            let i = self.as_int(&idx, pos)?;
+            if let Some((store, elem_size)) = self.ptr_target(&base) {
+                return Ok(self.make_ptr(store, i, elem_size, true));
+            }
+        }
+        let v = self.eval(expr, env)?;
+        if let Some((store, elem_size)) = self.ptr_target(&v) {
+            return Ok(self.make_ptr(store, 0, elem_size, true));
+        }
+        let elem_size = size_of_value(&v);
+        let store = Rc::new(RefCell::new(vec![v]));
+        Ok(self.make_ptr(store, 0, elem_size, true))
+    }
+
+    /// The backing store and element size for a value a raw pointer can address.
+    fn ptr_target(&self, v: &Value) -> Option<(Rc<RefCell<Vec<Value>>>, usize)> {
+        match v {
+            Value::List(l) | Value::Set(l) => {
+                let elem = l.borrow().first().map(size_of_value).unwrap_or(1);
+                Some((l.clone(), elem))
+            }
+            Value::Ptr(p) => Some((p.store.clone(), p.elem_size)),
+            _ => None,
+        }
+    }
+
+    fn make_ptr(&self, store: Rc<RefCell<Vec<Value>>>, index: i64, elem_size: usize, mutable: bool) -> Value {
+        Value::Ptr(Rc::new(PtrData { store, index, elem_size, mutable }))
+    }
+
+    /// Read through a safe reference or a raw pointer.
+    fn deref(&self, v: &Value, pos: Pos) -> R<Value> {
+        match v {
+            Value::Ref(cell, _) => Ok(cell.borrow().clone()),
+            Value::Ptr(p) => {
+                let store = p.store.borrow();
+                if p.index < 0 || p.index as usize >= store.len() {
+                    return rt(pos, "raw pointer dereference out of bounds");
+                }
+                Ok(store[p.index as usize].clone())
+            }
+            other => Ok(other.clone()),
+        }
+    }
+
+    /// Write `new` through a safe reference or a raw pointer (`*r = v`).
+    fn write_through(&self, target: &Value, new: Value, pos: Pos) -> R<()> {
+        match target {
+            Value::Ref(cell, mutable) => {
+                if !*mutable {
+                    return rt(pos, "cannot assign through a shared reference `&T`");
+                }
+                *cell.borrow_mut() = new;
+                Ok(())
+            }
+            Value::Ptr(p) => {
+                if !p.mutable {
+                    return rt(pos, "cannot assign through a `*const` pointer");
+                }
+                let mut store = p.store.borrow_mut();
+                if p.index < 0 || p.index as usize >= store.len() {
+                    return rt(pos, "raw pointer write out of bounds");
+                }
+                store[p.index as usize] = new;
+                Ok(())
+            }
+            _ => rt(pos, "cannot assign through a non-reference value"),
         }
     }
 
@@ -703,6 +821,22 @@ impl Interp {
             BinOp::Eq => return Ok(Value::Bool(value_eq(&l, &r))),
             BinOp::Ne => return Ok(Value::Bool(!value_eq(&l, &r))),
             _ => {}
+        }
+
+        // Pointer arithmetic, scaled by element (Section 11): `p + n` selects the
+        // element n steps along, matching `arr[i] == *(arr_ptr + i)`.
+        if matches!(op, BinOp::Add | BinOp::Sub) {
+            match (&l, &r) {
+                (Value::Ptr(p), Value::Int(n)) | (Value::Int(n), Value::Ptr(p)) => {
+                    let step = if op == BinOp::Sub { -n } else { *n };
+                    return Ok(self.make_ptr(p.store.clone(), p.index + step, p.elem_size, p.mutable));
+                }
+                // `q - p` is the element distance between two pointers.
+                (Value::Ptr(a), Value::Ptr(b)) if op == BinOp::Sub => {
+                    return Ok(Value::Int(a.index - b.index));
+                }
+                _ => {}
+            }
         }
 
         // String concatenation with `+`.
@@ -882,6 +1016,14 @@ impl Interp {
                 } else {
                     rt(pos, "cannot assign to a field of a non-struct value")
                 }
+            }
+            // `*r = v` / `*p += n`: write through a reference or raw pointer.
+            ExprKind::Unary { op: UnOp::Deref, expr } => {
+                let target = self.eval(expr, env)?;
+                let cur = self.deref(&target, pos)?;
+                let new = self.apply_compound(op, cur, rhs, pos)?;
+                self.write_through(&target, new, pos)?;
+                Ok(Value::Unit)
             }
             _ => rt(pos, "invalid assignment target"),
         }
@@ -1573,6 +1715,7 @@ impl Interp {
     fn as_bool(&self, v: &Value, pos: Pos) -> R<bool> {
         match v {
             Value::Bool(b) => Ok(*b),
+            Value::Ref(cell, _) => self.as_bool(&cell.borrow(), pos),
             _ => rt(pos, format!("expected bool, found {}", v.type_name())),
         }
     }
@@ -1580,6 +1723,7 @@ impl Interp {
     fn as_int(&self, v: &Value, pos: Pos) -> R<i64> {
         match v {
             Value::Int(n) => Ok(*n),
+            Value::Ref(cell, _) => self.as_int(&cell.borrow(), pos),
             _ => rt(pos, format!("expected integer, found {}", v.type_name())),
         }
     }
@@ -1588,6 +1732,7 @@ impl Interp {
         match v {
             Value::Int(n) => Ok(*n as f64),
             Value::Float(f) => Ok(*f),
+            Value::Ref(cell, _) => self.as_f64(&cell.borrow(), pos),
             _ => rt(pos, format!("expected number, found {}", v.type_name())),
         }
     }
@@ -1694,6 +1839,21 @@ impl Interp {
                 Some(Value::Float(f)) => Some(Value::Float(f.abs())),
                 _ => return rt(pos, "abs expects a number"),
             },
+            // Heap allocation (Section 11): `alloc(n)` returns a `*mut u8` to a
+            // zeroed region of n bytes; `dealloc(p, n)` releases it.
+            "alloc" => {
+                let n = self.as_int(argv.get(0).unwrap_or(&Value::Unit), pos)?.max(0) as usize;
+                let store = Rc::new(RefCell::new(vec![Value::Int(0); n]));
+                Some(self.make_ptr(store, 0, 1, true))
+            }
+            "dealloc" => {
+                // Model the free: drop the region so a later access surfaces as
+                // an out-of-bounds dereference rather than reading stale data.
+                if let Some(Value::Ptr(p)) = argv.get(0) {
+                    p.store.borrow_mut().clear();
+                }
+                Some(Value::Unit)
+            }
             // A buffered channel; capacity (if given) is advisory in v0.1.
             "channel" => {
                 let capacity = match argv.get(0) {
@@ -2502,6 +2662,21 @@ pub fn display(v: &Value) -> String {
         Value::Closure(_) | Value::Function(_) => "<fn>".into(),
         Value::Channel(_) => "<channel>".into(),
         Value::Future(_) => "<future>".into(),
+        // A reference prints as the value it points to (auto-deref).
+        Value::Ref(cell, _) => display(&cell.borrow()),
+        Value::Ptr(_) => "<ptr>".into(),
+    }
+}
+
+/// A best-effort `sizeof(T)` for the byte-offset view of pointer arithmetic.
+/// Indexing itself is element-based, so this only affects the reported scale.
+fn size_of_value(v: &Value) -> usize {
+    match v {
+        Value::Bool(_) => 1,
+        Value::Char(_) => 4,
+        Value::Float(_) => 8,
+        Value::Int(_) => 8,
+        _ => 1,
     }
 }
 

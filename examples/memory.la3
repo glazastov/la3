@@ -1,0 +1,44 @@
+// Memory model (reference Section 11): safe references, raw pointers with
+// element-scaled arithmetic, and manual heap allocation.
+//
+// Safe references (`&T` / `&mut T`) alias a binding's storage, so writing
+// through a `&mut` is visible to the caller. Raw pointers (`*T` / `*mut T`) are
+// bare addresses: dereferencing one requires an `unsafe` block, and `p + n`
+// advances by n elements (n * sizeof(T) bytes), so `arr[i] == *(arr_ptr + i)`.
+
+fn double_in_place(x: &mut i32) {
+    *x *= 2
+}
+
+fn main() {
+    // A safe mutable reference mutates the caller's binding.
+    let mut n = 21
+    double_in_place(&mut n)
+    io.println(f"after double_in_place: n = {n}")
+
+    // A raw pointer into an array. Arithmetic is scaled by element type.
+    let arr: [i32; 5] = [10, 20, 30, 40, 50]
+    let base: *i32 = &raw arr[0]
+    unsafe {
+        let third = *(base + 2)
+        io.println(f"third element via pointer: {third}")
+    }
+
+    // arr[i] and *(base + i) name the same element.
+    let i = 3
+    let direct = arr[i]
+    let viaptr = unsafe { *(base + i) }
+    io.println(f"arr[{i}] = {direct}, *(base + {i}) = {viaptr}")
+
+    // Manual heap allocation: alloc n bytes, write/read through the pointer,
+    // then free with the same size.
+    let buf: *mut u8 = alloc(4)
+    unsafe {
+        *buf = 0xDE
+        *(buf + 1) = 0xAD
+        *(buf + 2) = 0xBE
+        *(buf + 3) = 0xEF
+        io.println(f"buf bytes: {*buf} {*(buf + 1)} {*(buf + 2)} {*(buf + 3)}")
+    }
+    dealloc(buf, 4)
+}

@@ -68,14 +68,16 @@ fn continues_after(t: &Tok) -> bool {
             | Tok::QuestionDot
             | Tok::Plus
             | Tok::Minus
-            | Tok::Star
+            // `*` and `&` are intentionally absent: a line starting with one is a
+            // dereference/reference statement (`*p = v`), not a continued binary
+            // multiply/bit-and. Continuation puts the operator at the line end
+            // (see `open_before`), so this only affects leading `*` / `&`.
             | Tok::StarStar
             | Tok::Slash
             | Tok::Percent
             | Tok::AmpAmp
             | Tok::PipePipe
             | Tok::Pipe
-            | Tok::Amp
             | Tok::Caret
             | Tok::Shl
             | Tok::Shr
