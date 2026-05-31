@@ -62,7 +62,7 @@ full borrow checker, real `net`/`crypto`. `Result`/`Option`/`?` land early (just
 Prerequisite for everything. The light `typeck` becomes the source of truth.
 
 - [x] 1.1 Annotate **every AST node** with a concrete `Ty` — `NodeId` on `Expr` ([ast.rs](src/ast.rs)), `Program::assign_ids`, `typeck::check_types` → `TypeTable`, debug `la3 types`
-- [ ] 1.2 Full field & method resolution (struct/enum/builtin) → error if unresolved
+- [x] 1.2 Full field & method resolution — `builtin_method_sig` now returns `Option` (None = no such method); unresolved field on a known struct/tuple or method on a known type (`resolves_methods`) is an error; lenient on `Unknown`/generics/pointers
 - [ ] 1.3 _Layout_ computation: structs, **tagged unions** for enums (incl. `Option`/`Result`), tuples, `[T;N]`
 - [ ] 1.4 Exact `as` semantics: truncation, sign, `**`→`f64`, `//` floor, `/` trunc-toward-zero
 - [ ] 1.5 Sound inference (`i32`/`f64` defaults, no implicit widening) + real type errors
@@ -131,3 +131,4 @@ Prerequisite for everything. The light `typeck` becomes the source of truth.
 - 2026-05-31 — Plan created. Toolchain: rustup stable 1.94 (system 1.75 ignored). LLVM 18 at `/usr/lib/llvm-18`. Starting Phase 0.
 - 2026-05-31 — **Phase 0 complete.** Removed the conflicting Ubuntu system Rust 1.75 (`apt`), so plain `cargo` is now rustup `stable` 1.96 (edition 2024). Added `runtime/` crate, `la3 build` stub, and the differential harness (13 examples, all skipped pending codegen). `cargo test --workspace`: 33 + 2 pass. Awaiting review before Phase 1.
 - 2026-05-31 — **Phase 1.1 done.** Added `NodeId` to `Expr`, numbered by `Program::assign_ids` (called in `parser::parse`). Type checker now records a concrete `Ty` per node into a `TypeTable` (`typeck::check_types`); new `la3 types` command dumps it. Tests: 53 pass (added `types_command_annotates_all_examples`).
+- 2026-05-31 — **Phase 1.2 done.** Field/method resolution now errors instead of silently yielding `Unknown`: unknown struct field, bad tuple index, and unknown method on a fully-modeled receiver (`resolves_methods`) are reported with spans. `builtin_method_sig` returns `Option`. Stays lenient on `Unknown`/`Param`/pointers/refs to avoid false positives. Tests: 60 pass (+7 `p12_*`).

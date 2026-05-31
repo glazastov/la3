@@ -407,3 +407,63 @@ fn s11_ptr_plus_str_rejected() {
         "pointer arithmetic offset must be an integer",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 1.2 — Full field and method resolution
+// ---------------------------------------------------------------------------
+
+#[test]
+fn p12_unknown_struct_field_rejected() {
+    rejects(
+        "struct Point { x: f64, y: f64 }\n\
+         fn main() { let p = Point { x: 1.0, y: 2.0 }; io.println(p.z) }",
+        "no field `z` on struct `Point`",
+    );
+}
+
+#[test]
+fn p12_known_struct_field_is_fine() {
+    ok("struct Point { x: f64, y: f64 }\n\
+        fn main() { let p = Point { x: 1.0, y: 2.0 }; io.println(p.x) }");
+}
+
+#[test]
+fn p12_unknown_method_on_list_rejected() {
+    rejects(
+        "fn main() { let xs: List<i32> = [1, 2, 3]; io.println(xs.bogus()) }",
+        "no method `bogus` on type `List<i32>`",
+    );
+}
+
+#[test]
+fn p12_known_methods_and_chaining_are_fine() {
+    ok("fn main() {\n\
+        let xs: List<i32> = [1, 2, 3]\n\
+        io.println(xs.len())\n\
+        io.println(xs.map(|v| v * 2).first())\n\
+        }");
+}
+
+#[test]
+fn p12_unknown_method_on_struct_rejected() {
+    rejects(
+        "struct Point { x: f64, y: f64 }\n\
+         fn main() { let p = Point { x: 1.0, y: 2.0 }; io.println(p.area()) }",
+        "no method `area` on type `Point`",
+    );
+}
+
+#[test]
+fn p12_declared_method_is_fine() {
+    ok("struct Point { x: f64, y: f64 }\n\
+        impl Point { fn area(&self) -> f64 { self.x * self.y } }\n\
+        fn main() { let p = Point { x: 2.0, y: 3.0 }; io.println(p.area()) }");
+}
+
+#[test]
+fn p12_bad_tuple_index_rejected() {
+    rejects(
+        "fn main() { let t = (1, 2); io.println(t.5) }",
+        "no field `5` on tuple",
+    );
+}

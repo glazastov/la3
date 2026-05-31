@@ -1407,9 +1407,9 @@ impl TypeChecker {
         method: &str,
         _type_args: &[TypeExpr],
         args: &[Expr],
-        _pos: Pos,
+        pos: Pos,
     ) -> Ty {
-        self.check_borrow_conflicts(args, _pos);
+        self.check_borrow_conflicts(args, pos);
         // `module.fn(...)` (io, fs, os, math, json, bytes, crypto, net, ...).
         if let ExprKind::Ident(modname) = &recv.kind {
             if self.lookup(modname).is_none() && is_module(modname) {
@@ -1439,7 +1439,22 @@ impl TypeChecker {
         }
 
         // Builtin methods on str / List / Map / Set / Option / Result.
-        let (param_tys, ret) = builtin_method_sig(&base, method);
+        let (param_tys, ret) = match builtin_method_sig(&base, method) {
+            Some(sig) => sig,
+            None => {
+                // The receiver's type is known and we model its full method set,
+                // yet the method does not resolve: a real error. For types whose
+                // surface we don't fully model (Unknown, generics, pointers,
+                // references) stay lenient and produce Unknown.
+                if resolves_methods(&base) {
+                    self.err(
+                        pos,
+                        format!("no method `{}` on type `{}`", method, display_ty(&base)),
+                    );
+                }
+                (vec![], Ty::Unknown)
+            }
+        };
         for (i, a) in args.iter().enumerate() {
             let expected = param_tys.get(i).cloned();
             if let ExprKind::Closure { params, body, .. } = &a.kind {
@@ -1451,7 +1466,7 @@ impl TypeChecker {
         wrap_optional(ret, optional)
     }
 
-    fn infer_field(&mut self, recv: &Expr, optional: bool, name: &str, _pos: Pos) -> Ty {
+    fn infer_field(&mut self, recv: &Expr, optional: bool, name: &str, pos: Pos) -> Ty {
         // Module constants: `math.pi`, `math.e`, `math.inf`.
         if let ExprKind::Ident(modname) = &recv.kind {
             if self.lookup(modname).is_none() {
@@ -1469,8 +1484,26 @@ impl TypeChecker {
         }
         let rty = self.infer(recv);
         let base = if optional { rty.strip_nil() } else { rty };
-        let result = self.field_ty(&base, name).unwrap_or(Ty::Unknown);
-        wrap_optional(result, optional)
+        match self.field_ty(&base, name) {
+            Some(t) => wrap_optional(t, optional),
+            None => {
+                // Known struct/tuple but no such field/index → a real error. Other
+                // bases (collections, Unknown, generics) stay lenient.
+                if let Ty::Struct(sname, _) = &base {
+                    self.err(pos, format!("no field `{}` on struct `{}`", name, sname));
+                } else if let Ty::Tuple(ts) = &base {
+                    self.err(
+                        pos,
+                        format!(
+                            "no field `{}` on tuple of {} element(s)",
+                            name,
+                            ts.len()
+                        ),
+                    );
+                }
+                wrap_optional(Ty::Unknown, optional)
+            }
+        }
     }
 
     /// `Type.member` where `Type` is a known struct or enum name.
@@ -2186,10 +2219,31 @@ fn module_fn_ret(module: &str, func: &str) -> Ty {
     }
 }
 
+/// Whether the full method set of `t` is known to the checker, so an
+/// unresolved method on it is a genuine error rather than an unmodeled corner
+/// of the standard library. User types (`Struct`/`Enum`, including `Option`/
+/// `Result`) and the built-in collections / `str` qualify; `Unknown`, generic
+/// `Param`s, pointers and references stay lenient.
+fn resolves_methods(t: &Ty) -> bool {
+    matches!(
+        t,
+        Ty::Struct(..)
+            | Ty::Enum(..)
+            | Ty::Str
+            | Ty::List(_)
+            | Ty::Slice(_)
+            | Ty::Array(..)
+            | Ty::Map(..)
+            | Ty::Set(_)
+    )
+}
+
 /// `(parameter types, return type)` for a builtin method on a primitive or
-/// collection. Parameter types matter mainly so closures get inferred argument
-/// types; an unmodeled method yields `Unknown` and no parameter hints.
-fn builtin_method_sig(recv: &Ty, method: &str) -> (Vec<Ty>, Ty) {
+/// collection, or `None` when no such builtin method exists for the receiver.
+/// Parameter types matter mainly so closures get inferred argument types; a
+/// method that returns `Unknown` is still a *known* method (so it is `Some`),
+/// distinct from `None`, which means the method does not resolve at all.
+fn builtin_method_sig(recv: &Ty, method: &str) -> Option<(Vec<Ty>, Ty)> {
     use IntKind::Usize;
     let usize_t = Ty::Int(Usize);
     let unit = Ty::Unit;
@@ -2197,12 +2251,12 @@ fn builtin_method_sig(recv: &Ty, method: &str) -> (Vec<Ty>, Ty) {
 
     // Methods shared by every type.
     match method {
-        "len" => return (vec![], usize_t),
-        "is_empty" => return (vec![], boolean),
+        "len" => return Some((vec![], usize_t)),
+        "is_empty" => return Some((vec![], boolean)),
         _ => {}
     }
 
-    match recv {
+    Some(match recv {
         Ty::Str => match method {
             "contains" | "starts_with" | "ends_with" => (vec![Ty::Str], Ty::Bool),
             "to_upper" | "to_lower" | "trim" | "trim_start" | "trim_end" => (vec![], Ty::Str),
@@ -2213,7 +2267,7 @@ fn builtin_method_sig(recv: &Ty, method: &str) -> (Vec<Ty>, Ty) {
             "chars" => (vec![], Ty::List(Box::new(Ty::Char))),
             "as_bytes" => (vec![], Ty::Slice(Box::new(Ty::Int(IntKind::U8)))),
             "parse" => (vec![], Ty::result(Ty::Unknown)),
-            _ => (vec![], Ty::Unknown),
+            _ => return None,
         },
         Ty::List(e) | Ty::Slice(e) | Ty::Array(e, _) => {
             let e = (**e).clone();
@@ -2254,7 +2308,7 @@ fn builtin_method_sig(recv: &Ty, method: &str) -> (Vec<Ty>, Ty) {
                     Ty::List(Box::new(Ty::Tuple(vec![e, Ty::Unknown]))),
                 ),
                 "collect" => (vec![], Ty::Unknown),
-                _ => (vec![], Ty::Unknown),
+                _ => return None,
             }
         }
         Ty::Map(k, v) => {
@@ -2266,7 +2320,7 @@ fn builtin_method_sig(recv: &Ty, method: &str) -> (Vec<Ty>, Ty) {
                 "contains" | "contains_key" => (vec![k], Ty::Bool),
                 "keys" => (vec![], Ty::List(Box::new(k))),
                 "values" => (vec![], Ty::List(Box::new(v))),
-                _ => (vec![], Ty::Unknown),
+                _ => return None,
             }
         }
         Ty::Set(e) => {
@@ -2275,7 +2329,7 @@ fn builtin_method_sig(recv: &Ty, method: &str) -> (Vec<Ty>, Ty) {
                 "insert" => (vec![e], unit),
                 "contains" => (vec![e], Ty::Bool),
                 "remove" => (vec![e], unit),
-                _ => (vec![], Ty::Unknown),
+                _ => return None,
             }
         }
         Ty::Enum(n, args) if n == "Option" => {
@@ -2293,7 +2347,7 @@ fn builtin_method_sig(recv: &Ty, method: &str) -> (Vec<Ty>, Ty) {
                     vec![Ty::Fn(vec![inner], Box::new(Ty::Unknown))],
                     Ty::Unknown,
                 ),
-                _ => (vec![], Ty::Unknown),
+                _ => return None,
             }
         }
         Ty::Enum(n, args) if n == "Result" => {
@@ -2315,9 +2369,9 @@ fn builtin_method_sig(recv: &Ty, method: &str) -> (Vec<Ty>, Ty) {
                     vec![Ty::Fn(vec![inner], Box::new(Ty::Unknown))],
                     Ty::Unknown,
                 ),
-                _ => (vec![], Ty::Unknown),
+                _ => return None,
             }
         }
-        _ => (vec![], Ty::Unknown),
-    }
+        _ => return None,
+    })
 }
