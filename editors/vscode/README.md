@@ -26,18 +26,35 @@ no runtime dependencies; the extension is TypeScript compiled to a single
 It finds the binary in this order:
 
 1. the `la3.path` setting, if set;
-2. `target/release/la3`, then `target/debug/la3` under the workspace;
-3. `la3` on your `PATH`.
+2. `target/release/la3`, then `target/debug/la3` under the workspace (so
+   contributors test against a fresh build);
+3. the binary **bundled with the extension** for your platform
+   (`bin/<platform>-<arch>/la3`), which makes a plain install self-contained;
+4. `la3` on your `PATH`.
 
 If none is found it offers to build the interpreter for you.
 
+### Bundled binary
+
+A release build of the interpreter is packaged inside the extension so it works
+out of the box without a local toolchain. Because the binary is
+platform-specific, the bundle is keyed by `bin/<platform>-<arch>/`. Regenerate
+it for the current platform with:
+
+```bash
+bun run bundle:bin
+```
+
+The bundled Linux binary is dynamically linked against glibc; on musl-based
+distros (e.g. Alpine) build your own and point `la3.path` at it.
+
 ## Settings
 
-| Setting | Default | Meaning |
-| ------- | ------- | ------- |
-| `la3.path` | `""` | Explicit path to the `la3` binary (overrides auto-detection). |
-| `la3.diagnostics.run` | `"onType"` | `onType`, `onSave`, or `off`. |
-| `la3.diagnostics.debounce` | `350` | Milliseconds after the last keystroke before re-checking (onType). |
+| Setting                    | Default    | Meaning                                                            |
+| -------------------------- | ---------- | ------------------------------------------------------------------ |
+| `la3.path`                 | `""`       | Explicit path to the `la3` binary (overrides auto-detection).      |
+| `la3.diagnostics.run`      | `"onType"` | `onType`, `onSave`, or `off`.                                      |
+| `la3.diagnostics.debounce` | `350`      | Milliseconds after the last keystroke before re-checking (onType). |
 
 ## Try it without packaging
 
@@ -70,16 +87,20 @@ Packaging runs the compile step automatically (`vscode:prepublish`):
 cd editors/vscode
 bun install
 bunx @vscode/vsce package
-code --install-extension la3-language-0.2.0.vsix --force
+code --install-extension la3-language-*.vsix --force
 ```
 
 ## Files
 
-| File                           | Purpose                                               |
-| ------------------------------ | ----------------------------------------------------- |
-| `package.json`                 | Manifest: language, grammar, commands, settings       |
-| `src/extension.ts`             | Diagnostics integration and commands (TypeScript)     |
-| `tsconfig.json`                | TypeScript compiler options                           |
-| `out/extension.js`             | Compiled output (generated; what VS Code loads)       |
-| `language-configuration.json`  | Comments, brackets, auto-closing, indentation         |
-| `syntaxes/la3.tmLanguage.json` | The TextMate grammar                                  |
+| File                           | Purpose                                                 |
+| ------------------------------ | ------------------------------------------------------- |
+| `package.json`                 | Manifest: language, grammar, commands, settings         |
+| `src/extension.ts`             | Diagnostics integration and commands (TypeScript)       |
+| `tsconfig.json`                | TypeScript compiler options                             |
+| `out/extension.js`             | Compiled output (generated; what VS Code loads)         |
+| `language-configuration.json`  | Comments, brackets, auto-closing, indentation           |
+| `syntaxes/la3.tmLanguage.json` | The TextMate grammar                                    |
+| `scripts/bundle-binary.mjs`    | Copies the release binary into `bin/<platform>-<arch>/` |
+| `bin/<platform>-<arch>/la3`    | Bundled interpreter (generated)                         |
+| `images/`                      | Extension and `.la3` file icons                         |
+| `CHANGELOG.md`                 | Version history                                         |

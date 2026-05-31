@@ -18,6 +18,9 @@ import * as path from "path";
 let diagnostics: vscode.DiagnosticCollection;
 let output: vscode.OutputChannel;
 
+/** Absolute path to the installed extension, set on activation. */
+let extensionPath = "";
+
 /** Debounce timers keyed by document URI. */
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -35,6 +38,7 @@ const DIAG_RE =
   /^(lex error|parse error|type error|runtime error): (.+) \([^()]*:(\d+):(\d+)\)\s*$/;
 
 export function activate(context: vscode.ExtensionContext): void {
+  extensionPath = context.extensionPath;
   diagnostics = vscode.languages.createDiagnosticCollection("la3");
   output = vscode.window.createOutputChannel("La3");
   context.subscriptions.push(diagnostics, output);
@@ -192,7 +196,16 @@ function tokenRange(
   return new vscode.Range(line, col, line, col + 1);
 }
 
-/** Resolve the `la3` binary path; returns "la3" to defer to PATH as a last resort. */
+/**
+ * Resolve the `la3` binary path. Resolution order, most to least specific:
+ *   1. the `la3.path` setting;
+ *   2. a fresh build in the workspace (`target/release`, then `target/debug`),
+ *      so contributors test against what they just compiled;
+ *   3. the binary bundled inside the extension for this platform, which makes a
+ *      plain install self-contained;
+ *   4. `la3` on PATH.
+ * Returns "la3" to defer to PATH as a last resort.
+ */
 function resolveBinary(): string {
   const configured = config().get<string>("path", "");
   if (configured) return configured;
@@ -203,8 +216,31 @@ function resolveBinary(): string {
       if (fs.existsSync(p)) return p;
     }
   }
+
+  const bundled = bundledBinary();
+  if (bundled) return bundled;
+
   // Fall back to PATH; execFile will surface ENOENT if it is not there.
   return "la3";
+}
+
+/**
+ * Path to the platform-specific binary shipped with the extension, or null if
+ * none is bundled for the current platform. The executable bit can be lost when
+ * the .vsix is extracted, so restore it best-effort on Unix.
+ */
+function bundledBinary(): string | null {
+  const exe = process.platform === "win32" ? "la3.exe" : "la3";
+  const p = path.join(extensionPath, "bin", `${process.platform}-${process.arch}`, exe);
+  if (!fs.existsSync(p)) return null;
+  if (process.platform !== "win32") {
+    try {
+      fs.chmodSync(p, 0o755);
+    } catch {
+      // best effort; if it fails, execFile will report the real error
+    }
+  }
+  return p;
 }
 
 function promptMissingBinary(): void {
