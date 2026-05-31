@@ -3,3 +3,4 @@ Cargo.lock
 *.swp
 *.vsix
 node_modules/
+laila-lang-reference.md

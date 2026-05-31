@@ -1,0 +1,11 @@
+[package]
+name = "la3_runtime"
+version = "0.1.0"
+edition = "2024"
+description = "Native runtime that compiled La3 programs link against (heap types, RC, stdlib intrinsics)."
+license = "MIT"
+
+[lib]
+# `staticlib` produces the .a that the LLVM-generated objects link against;
+# `rlib` lets Rust integration tests exercise the runtime directly.
+crate-type = ["staticlib", "rlib"]

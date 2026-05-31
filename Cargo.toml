@@ -1,8 +1,11 @@
+[workspace]
+members = ["runtime"]
+
 [package]
 name = "la3"
 version = "0.1.0"
-edition = "2021"
-description = "Lexer, parser, checker, and tree-walking interpreter for Laila Lang (La3), a reading pseudo-language."
+edition = "2024"
+description = "Lexer, parser, checker, tree-walking interpreter, and (WIP) LLVM compiler for Laila Lang (La3)."
 license = "MIT"
 repository = "https://github.com/glazastov/la3"
 readme = "README.md"

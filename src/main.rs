@@ -5,6 +5,7 @@
 //!   la3 check <file.la3>   parse and report undefined-name errors
 //!   la3 ast   <file.la3>   parse and print the AST
 //!   la3 tokens <file.la3>  print the token stream (debugging)
+//!   la3 build <file.la3>   compile to a native binary (WIP, see COMPILER_PLAN.md)
 
 mod ast;
 mod checker;
@@ -19,7 +20,7 @@ use std::process::exit;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        eprintln!("usage: la3 <run|check|ast|tokens> <file.la3>");
+        eprintln!("usage: la3 <run|check|build|ast|tokens> <file.la3>");
         exit(2);
     }
     let cmd = args[1].as_str();
@@ -81,6 +82,29 @@ fn main() {
             if let Err(d) = interp.run(&prog) {
                 fail(&d, path, &src);
             }
+        }
+        "build" => {
+            // Front-end is shared with the interpreter: parse, then run the
+            // checker. Codegen itself lands in Phase 4 (see COMPILER_PLAN.md);
+            // for now `build` proves the front-end accepts the program and
+            // reports that the LLVM backend is not wired yet.
+            let prog = match parser::parse(&src) {
+                Ok(p) => p,
+                Err(d) => fail(&d, path, &src),
+            };
+            let errs = checker::check(&prog);
+            if !errs.is_empty() {
+                for d in &errs {
+                    eprintln!("{}\n", d.render(path, &src));
+                }
+                exit(1);
+            }
+            eprintln!(
+                "la3: front-end OK for {}; native codegen is not implemented yet \
+                 (LLVM backend lands in Phase 4 — see COMPILER_PLAN.md)",
+                path
+            );
+            exit(3);
         }
         other => {
             eprintln!("la3: unknown command '{}'", other);
