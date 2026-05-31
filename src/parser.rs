@@ -1365,10 +1365,42 @@ impl Parser {
                         };
                     }
                 }
+                // Bare turbofish on a callable name: `channel<str>(...)`. Only a
+                // `<types>(` shape commits; anything else restores and lets `<`
+                // parse as the comparison operator.
+                Tok::Lt if matches!(lhs.kind, ExprKind::Ident(_) | ExprKind::Path(_)) => {
+                    let save = self.i;
+                    if !self.try_bare_turbofish() {
+                        self.i = save;
+                        break;
+                    }
+                    // The generic args are erased; the call (`(`) follows.
+                }
                 _ => break,
             }
         }
         Ok(lhs)
+    }
+
+    /// Try to consume `<type, ...>` immediately followed by `(`. Returns false
+    /// (leaving the cursor wherever it stopped, for the caller to restore) when
+    /// the tokens are not a turbofish.
+    fn try_bare_turbofish(&mut self) -> bool {
+        if !self.eat(&Tok::Lt) {
+            return false;
+        }
+        loop {
+            if self.parse_type().is_err() {
+                return false;
+            }
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        if !self.eat(&Tok::Gt) {
+            return false;
+        }
+        self.at(&Tok::LParen)
     }
 
     fn parse_args(&mut self) -> Result<Vec<Expr>> {

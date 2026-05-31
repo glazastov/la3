@@ -42,6 +42,7 @@ The [`examples/`](examples/) directory has runnable programs:
 | `cli_args.la3` | `os.args()`, `os.env()` |
 | `word_count.la3` | file read, tokenize, count, `sort_by` |
 | `http_server.la3` | an in-process router over modeled requests |
+| `channels.la3` | channels, `spawn`/`join`, `await all`/`race` |
 
 ```bash
 cargo run -- run examples/shapes.la3
@@ -52,7 +53,7 @@ cargo run -- run examples/shapes.la3
 - **Lexer**: comments, numeric bases and suffixes, char/string/f-string literals.
 - **Parser**: items (`fn`, `struct`, `enum`, `impl`, `interface`, `const`, `type`, `use`, `mod`), a Pratt expression parser, patterns, and optional semicolons via significant-newline filtering.
 - **Checker**: name resolution (reports undefined names) followed by a static **type checker** covering reference Sections 2, 4, 7, and 9 — type inference for `let`/`const`, the `i32`/`f64` literal defaults, no implicit numeric conversion (an `as` cast is required), the `nil` / `Option<T>` identity, operator typing (`**` yields `f64`, comparison/logical yield `bool`, bitwise needs integers, `??`/`?.` on `T | nil`), `if`/`match` arm agreement, `match` exhaustiveness, the `?`-operator context rule, struct-literal field checking, and nominal interface conformance for generic bounds (`T: Iface` needs an explicit `impl`).
-- **Interpreter**: immutable-by-default bindings, closures, recursion, generics (erased), `match` with guards/ranges/bindings, `if`/`while`/`while let`/`for`/`loop`, structs and methods, enums with data, `Option`/`Result` with `?`, tuples, lists, maps, sets, ranges, f-strings with format specs, and a standard-library subset (`io`, `fs`, `os`, `json`, `math`, `bytes`, free `str`/`len`/`min`/`max`/`to_hex`/`from_hex`).
+- **Interpreter**: immutable-by-default bindings, closures, recursion, generics (erased), `match` with guards/ranges/bindings, `if`/`while`/`while let`/`for`/`loop`, structs and methods, enums with data, `Option`/`Result` with `?`, tuples, lists, maps, sets, ranges, f-strings with format specs, **concurrency** (channels with `send`/`recv`/`close`/iteration, `spawn`/`join`, and `await all`/`race` over a cooperative scheduler), and a standard-library subset (`io`, `fs`, `os`, `json`, `math`, `bytes`, free `str`/`len`/`min`/`max`/`to_hex`/`from_hex`).
 
 ## Deliberate deviations from the spec
 
@@ -60,7 +61,7 @@ These are points where the written language has an ambiguity or a feature this i
 
 - **`//` is always a line comment.** The reference overloads `//` for both line comments (from C/Rust) and floor division (from Lua); a lexer cannot tell `7 // 2` from `x // note` apart. Floor division is the `idiv(a, b)` builtin instead.
 - **`nil` and `None` are the same runtime value**, exactly as the spec states; `Some`/`Ok`/`Err` are tagged values.
-- **`spawn`, `await`, `all`, `race` run synchronously.** The interpreter is single-threaded, so concurrency primitives execute eagerly and in order, which preserves the observable result of example programs.
+- **Concurrency is cooperative, not parallel.** The interpreter is single-threaded (its value model is `Rc`-based and the project takes no dependencies, so OS-thread parallelism and preemptive coroutines are out of scope). Instead, `spawn` defers a task that runs to completion the first time its result is needed: a `join`, an `await`, a `recv` that finds the channel empty, or program shutdown (so fire-and-forget tasks still run). A blocked `recv` drives the scheduler, so a producer task runs before the consumer retries; this gives correct producer/consumer ordering and real interleaving at the task level, though not mid-task preemption. `await all(...)` resolves every task in order and `await race(...)` takes the first. Channel `capacity` is therefore advisory (the buffer is never bounded in a way that could deadlock a single-threaded run), and a `recv` from an empty channel that no runnable task can fill or close is reported as a deadlock.
 - **`move` closures behave like ordinary closures.** Captures are by reference; ownership transfer is not modeled.
 - **Types are checked lightly.** Annotations are parsed and mostly informational; there is no full static type system in v0.1.
 

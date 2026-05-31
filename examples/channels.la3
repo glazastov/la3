@@ -1,0 +1,44 @@
+// Concurrency (reference Section 12): channels, spawn/join, and await all/race.
+//
+// The interpreter is single-threaded, so concurrency is cooperative: a spawned
+// task runs to completion the first time its result is needed (a blocked `recv`,
+// a `join`, an `await`, or program shutdown). A channel `recv` that finds the
+// buffer empty drives the scheduler, letting a producer run before it retries.
+
+fn main() {
+    // A producer task fills a channel; the main flow consumes it. The `for` loop
+    // blocks on each `recv` until the producer sends or closes the channel.
+    let ch = channel<i64>(capacity: 8)
+    spawn {
+        for i in 1..=5 {
+            ch.send(i * i)
+        }
+        ch.close()
+    }
+
+    let mut total = 0
+    for square in ch {
+        io.println(f"received {square}")
+        total += square
+    }
+    io.println(f"sum of squares = {total}")
+
+    // spawn returns a handle; join runs the task and yields its value.
+    let worker = spawn {
+        let mut acc = 0
+        for k in 1..=10 {
+            acc += k
+        }
+        acc
+    }
+    io.println(f"worker result = {worker.join()}")
+
+    // await all(...) resolves every task, in order.
+    let tasks = [spawn { 10 }, spawn { 20 }, spawn { 30 }]
+    let values = await all(tasks)
+    io.println(f"all results = {values}")
+
+    // await race(...) resolves with the first task to finish.
+    let winner = await race(spawn { 100 }, spawn { 200 })
+    io.println(f"race winner = {winner}")
+}

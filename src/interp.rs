@@ -10,7 +10,7 @@
 //! - Floor division is the `idiv(a, b)` builtin (the `//` syntax is a comment).
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::rc::Rc;
 
@@ -51,6 +51,13 @@ pub enum Value {
     },
     Closure(Rc<ClosureData>),
     Function(Rc<FnDecl>),
+    /// A typed communication channel (Section 12). Shared by reference so the
+    /// same channel can be sent on by one task and received from by another.
+    Channel(Rc<RefCell<ChannelData>>),
+    /// A spawned task or future. It runs cooperatively to completion the first
+    /// time its result is needed (`join`, `await`, a blocked `recv`, or program
+    /// shutdown); the result is then memoized.
+    Future(Rc<TaskState>),
     Unit,
 }
 
@@ -58,6 +65,22 @@ pub struct ClosureData {
     params: Vec<Param>,
     body: Expr,
     env: Env,
+}
+
+/// A buffered channel. The `capacity` is advisory in v0.1; the cooperative
+/// scheduler runs producer tasks to completion, so the buffer is never bounded
+/// in a way that could deadlock a single-threaded run.
+pub struct ChannelData {
+    buf: VecDeque<Value>,
+    closed: bool,
+    capacity: Option<usize>,
+}
+
+/// The body of a spawned task plus its memoized result once it has run.
+pub struct TaskState {
+    body: Block,
+    env: Env,
+    result: RefCell<Option<Value>>,
 }
 
 impl Value {
@@ -77,6 +100,8 @@ impl Value {
             Value::Struct { name, .. } => name.to_string(),
             Value::Enum { ty, .. } => ty.to_string(),
             Value::Closure(_) | Value::Function(_) => "fn".into(),
+            Value::Channel(_) => "Channel".into(),
+            Value::Future(_) => "Future".into(),
             Value::Unit => "()".into(),
         }
     }
@@ -188,6 +213,9 @@ pub struct Interp {
     variant_owner: HashMap<String, String>,
     /// Program arguments exposed via `os.args()`.
     args: Vec<String>,
+    /// Spawned tasks that have not yet been forced to completion. The scheduler
+    /// drains this queue when a `recv` blocks and again at program shutdown.
+    ready: VecDeque<Rc<TaskState>>,
 }
 
 impl Interp {
@@ -199,6 +227,7 @@ impl Interp {
             methods: HashMap::new(),
             variant_owner: HashMap::new(),
             args: Vec::new(),
+            ready: VecDeque::new(),
         }
     }
 
@@ -210,7 +239,7 @@ impl Interp {
     /// Load all items, then call `main` if present.
     pub fn run(&mut self, prog: &Program) -> DResult<()> {
         self.load(prog);
-        if lookup(&self.globals, "main").is_some() {
+        let result = if lookup(&self.globals, "main").is_some() {
             let main = lookup(&self.globals, "main").unwrap();
             let f = main.borrow().clone();
             match self.call_value(f, vec![], Pos::default()) {
@@ -220,7 +249,11 @@ impl Interp {
             }
         } else {
             Ok(())
-        }
+        };
+        // Run any spawned tasks that were never joined, so fire-and-forget side
+        // effects (e.g. a `spawn` that only prints) still happen.
+        while let Ok(true) = self.run_one_ready(Pos::default()) {}
+        result
     }
 
     fn load(&mut self, prog: &Program) {
@@ -550,8 +583,21 @@ impl Interp {
                     _ => rt(pos, "`?` expects a Result or Option"),
                 }
             }
-            ExprKind::Await(inner) => self.eval(inner, env),
-            ExprKind::Spawn(body) => self.eval_block(body, env),
+            ExprKind::Await(inner) => {
+                let v = self.eval(inner, env)?;
+                self.force(v, pos)
+            }
+            ExprKind::Spawn(body) => {
+                // Defer the task; it runs when first forced (join/await/recv) or
+                // when the program drains remaining tasks at shutdown.
+                let task = Rc::new(TaskState {
+                    body: body.clone(),
+                    env: env.clone(),
+                    result: RefCell::new(None),
+                });
+                self.ready.push_back(task.clone());
+                Ok(Value::Future(task))
+            }
             ExprKind::Unsafe(body) => self.eval_block(body, env),
             ExprKind::TryCatch {
                 body,
@@ -1096,6 +1142,21 @@ impl Interp {
         pos: Pos,
     ) -> R<Value> {
         let it = self.eval(iter, env)?;
+        // A channel is consumed lazily, blocking until each value arrives or the
+        // channel closes, rather than being collected up front.
+        if let Value::Channel(ch) = &it {
+            while let Some(item) = self.channel_recv(ch, pos)? {
+                let loop_env = new_scope(Some(env.clone()));
+                self.bind_pattern(pat, item, &loop_env, false)?;
+                match self.eval_block_in(body, &new_scope(Some(loop_env))) {
+                    Ok(_) => {}
+                    Err(Signal::Break(_)) => break,
+                    Err(Signal::Continue) => continue,
+                    Err(other) => return Err(other),
+                }
+            }
+            return Ok(Value::Unit);
+        }
         let items = self.iterate(&it, pos)?;
         for item in items {
             let loop_env = new_scope(Some(env.clone()));
@@ -1135,6 +1196,69 @@ impl Interp {
                 .collect()),
             Value::Str(s) => Ok(s.chars().map(Value::Char).collect()),
             _ => rt(pos, format!("{} is not iterable", v.type_name())),
+        }
+    }
+
+    // ---- concurrency (Section 12) ----
+
+    /// Force a value: a `Future` runs to completion (memoized); anything else is
+    /// returned unchanged. Used by `await`, `join`, `all`, and `race`.
+    fn force(&mut self, v: Value, pos: Pos) -> R<Value> {
+        match v {
+            Value::Future(task) => self.run_task(&task, pos),
+            other => Ok(other),
+        }
+    }
+
+    /// Evaluate a task's body once and memoize its result.
+    fn run_task(&mut self, task: &Rc<TaskState>, _pos: Pos) -> R<Value> {
+        if let Some(v) = task.result.borrow().as_ref() {
+            return Ok(v.clone());
+        }
+        let v = match self.eval_block(&task.body, &task.env) {
+            Ok(v) => v,
+            Err(Signal::Return(v)) => v,
+            Err(e) => return Err(e),
+        };
+        *task.result.borrow_mut() = Some(v.clone());
+        Ok(v)
+    }
+
+    /// Run one not-yet-finished spawned task to completion. Returns `false` when
+    /// no runnable task remains. This is the cooperative scheduler's single step.
+    fn run_one_ready(&mut self, pos: Pos) -> R<bool> {
+        while let Some(task) = self.ready.pop_front() {
+            if task.result.borrow().is_some() {
+                continue;
+            }
+            self.run_task(&task, pos)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Receive from a channel, driving the scheduler when the buffer is empty but
+    /// the channel is still open. Returns `None` once the channel is closed and
+    /// drained. Errors if every task is blocked and the channel can never fill
+    /// (a genuine deadlock).
+    fn channel_recv(&mut self, ch: &Rc<RefCell<ChannelData>>, pos: Pos) -> R<Option<Value>> {
+        loop {
+            {
+                let mut c = ch.borrow_mut();
+                if let Some(v) = c.buf.pop_front() {
+                    return Ok(Some(v));
+                }
+                if c.closed {
+                    return Ok(None);
+                }
+            }
+            // Empty and open: let a producer task run, then retry.
+            if !self.run_one_ready(pos)? {
+                return rt(
+                    pos,
+                    "deadlock: receiving from an empty channel that no running task will fill or close",
+                );
+            }
         }
     }
 
@@ -1486,6 +1610,7 @@ impl Interp {
             Value::Set(s) => Ok(s.borrow().len()),
             Value::Map(m) => Ok(m.borrow().len()),
             Value::Tuple(t) => Ok(t.len()),
+            Value::Channel(ch) => Ok(ch.borrow().buf.len()),
             _ => rt(pos, format!("{} has no length", v.type_name())),
         }
     }
@@ -1569,12 +1694,38 @@ impl Interp {
                 Some(Value::Float(f)) => Some(Value::Float(f.abs())),
                 _ => return rt(pos, "abs expects a number"),
             },
-            // async primitives run synchronously
+            // A buffered channel; capacity (if given) is advisory in v0.1.
+            "channel" => {
+                let capacity = match argv.get(0) {
+                    Some(Value::Int(n)) if *n >= 0 => Some(*n as usize),
+                    _ => None,
+                };
+                Some(Value::Channel(Rc::new(RefCell::new(ChannelData {
+                    buf: VecDeque::new(),
+                    closed: false,
+                    capacity,
+                }))))
+            }
+            // `all` resolves every future and returns their results in order.
             "all" => {
                 let items = self.as_seq(&argv[0], pos).unwrap_or_default();
-                Some(list_val(items))
+                let mut out = Vec::with_capacity(items.len());
+                for it in items {
+                    out.push(self.force(it, pos)?);
+                }
+                Some(list_val(out))
             }
-            "race" => Some(argv.into_iter().next().unwrap_or(Value::Nil)),
+            // `race` resolves with the first future to complete. The cooperative
+            // scheduler runs to completion, so "first" is the first argument.
+            "race" => {
+                let first = argv.into_iter().next().unwrap_or(Value::Nil);
+                let first = match first {
+                    // `race(list)` and `race(a, b)` both reduce to a first item.
+                    Value::List(l) => l.borrow().first().cloned().unwrap_or(Value::Nil),
+                    other => other,
+                };
+                Some(self.force(first, pos)?)
+            }
             "to_hex" => {
                 let seq = self.as_seq(argv.get(0).unwrap_or(&Value::Unit), pos)?;
                 let mut s = String::new();
@@ -1748,6 +1899,39 @@ impl Interp {
         pos: Pos,
     ) -> R<Value> {
         match recv {
+            // ---- Channel (Section 12) ----
+            Value::Channel(ch) => match method {
+                "send" => {
+                    let v = args.into_iter().next().unwrap_or(Value::Unit);
+                    let mut c = ch.borrow_mut();
+                    if c.closed {
+                        return rt(pos, "send on a closed channel");
+                    }
+                    c.buf.push_back(v);
+                    Ok(Value::Unit)
+                }
+                "recv" => match self.channel_recv(&ch, pos)? {
+                    Some(v) => Ok(some(v)),
+                    None => Ok(Value::Nil),
+                },
+                "close" => {
+                    ch.borrow_mut().closed = true;
+                    Ok(Value::Unit)
+                }
+                "is_closed" => Ok(Value::Bool(ch.borrow().closed)),
+                "is_empty" => Ok(Value::Bool(ch.borrow().buf.is_empty())),
+                "capacity" => Ok(ch
+                    .borrow()
+                    .capacity
+                    .map(|c| Value::Int(c as i64))
+                    .unwrap_or(Value::Nil)),
+                _ => rt(pos, format!("Channel has no method '{}'", method)),
+            },
+            // ---- Future / spawned task ----
+            Value::Future(task) => match method {
+                "join" | "await" => self.run_task(&task, pos),
+                _ => rt(pos, format!("Future has no method '{}'", method)),
+            },
             // ---- Option / Result (Enum) and None (Nil) ----
             Value::Nil => match method {
                 "is_some" | "is_ok" => Ok(Value::Bool(false)),
@@ -2316,6 +2500,8 @@ pub fn display(v: &Value) -> String {
             }
         }
         Value::Closure(_) | Value::Function(_) => "<fn>".into(),
+        Value::Channel(_) => "<channel>".into(),
+        Value::Future(_) => "<future>".into(),
     }
 }
 
