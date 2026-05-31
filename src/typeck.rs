@@ -1012,16 +1012,51 @@ impl TypeChecker {
         let l = self.infer(lhs);
         let r = self.infer(rhs);
         use BinOp::*;
-        // Pointer arithmetic (Section 11): `p + n` / `p - n` stay pointers, and
-        // `p - q` is the element distance.
+
+        // Pointer arithmetic (Section 11 / spec Section 4).
+        // `*T + integer → *T`, `*mut T ± integer → *mut T`, `q - p → isize`.
+        // The offset may be any integer kind, an unresolved integer literal,
+        // Unknown, or a generic Param – it does NOT have to match the pointed-to
+        // type. Non-integer offsets produce a targeted diagnostic.
         if matches!(op, Add | Sub) {
-            match (&l, &r) {
-                (Ty::Ptr(_), Ty::Ptr(_)) if matches!(op, Sub) => return Ty::Int(IntKind::Isize),
-                (Ty::Ptr(_), _) => return l,
-                (_, Ty::Ptr(_)) if matches!(op, Add) => return r,
-                _ => {}
+            // `q - p` → element distance (isize)
+            if matches!((&l, &r), (Ty::Ptr(_), Ty::Ptr(_))) {
+                return Ty::Int(IntKind::Isize);
+            }
+            // `p ± n` → same pointer type
+            if matches!(&l, Ty::Ptr(_)) {
+                let offset_ok =
+                    r.is_int() || r.is_unknown() || matches!(&r, Ty::Param(_));
+                if !offset_ok {
+                    self.err(
+                        pos,
+                        format!(
+                            "pointer arithmetic offset must be an integer, found `{}`; \
+                             use an integer type (`i32`, `i64`, `usize`, …)",
+                            display_ty(&r)
+                        ),
+                    );
+                }
+                return l;
+            }
+            // `n + p` → same pointer type (commutative add only)
+            if matches!(&r, Ty::Ptr(_)) && matches!(op, Add) {
+                let offset_ok =
+                    l.is_int() || l.is_unknown() || matches!(&l, Ty::Param(_));
+                if !offset_ok {
+                    self.err(
+                        pos,
+                        format!(
+                            "pointer arithmetic offset must be an integer, found `{}`; \
+                             use an integer type (`i32`, `i64`, `usize`, …)",
+                            display_ty(&l)
+                        ),
+                    );
+                }
+                return r;
             }
         }
+
         match op {
             Add | Sub | Mul | Div | Rem => {
                 // `+` also concatenates strings.
