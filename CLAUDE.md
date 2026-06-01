@@ -78,7 +78,8 @@ non-obvious decision in `COMPILER_PLAN.md`.
 | [src/parser.rs](src/parser.rs)   | Recursive-descent parser → AST                     |
 | [src/ast.rs](src/ast.rs)         | AST node definitions                               |
 | [src/checker.rs](src/checker.rs) | Name-resolution pass                               |
-| [src/typeck.rs](src/typeck.rs)   | (Light) type checker; semantic `Ty`                |
-| [src/interp.rs](src/interp.rs)   | Tree-walking interpreter + builtins                |
+| [src/typeck.rs](src/typeck.rs)   | Type checker; semantic `Ty` (submodules in `typeck/`) |
+| [src/borrowck.rs](src/borrowck.rs) | Ownership / borrow checker (Phase 1.6)           |
+| [src/interp.rs](src/interp.rs)   | Tree-walking interpreter (submodules in `interp/`) |
 | [src/diag.rs](src/diag.rs)       | Diagnostics with source spans                      |
 | [src/main.rs](src/main.rs)       | CLI: `run`/`check`/`ast`/`tokens` (+ `build`, WIP) |

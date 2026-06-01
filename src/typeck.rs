@@ -39,12 +39,6 @@ use builtins::*;
 pub use layout::*;
 use relations::*;
 
-pub fn check(prog: &Program) -> Vec<Diagnostic> {
-    let mut tc = TypeChecker::new(prog);
-    tc.run(prog);
-    tc.errors
-}
-
 /// The type checker's full product: the diagnostics plus a concrete type for
 /// every expression node, keyed by [`NodeId`]. The compiler back-end consumes
 /// the table; `la3 types` dumps it. The program must already be numbered
@@ -60,6 +54,14 @@ impl TypeTable {
     /// `List<str>`, `Option<i32>`). `None` if the node was never typed.
     pub fn type_of(&self, id: NodeId) -> Option<String> {
         self.map.get(&id).map(display_ty)
+    }
+
+    /// Is the value of node `id` implicitly copyable (so reusing the binding
+    /// after a by-value use is fine)? Consumed by the borrow checker
+    /// ([`crate::borrowck`]). A node with no recorded type is treated as Copy so
+    /// the checker never invents a move on a type it does not model.
+    pub fn is_copy(&self, id: NodeId) -> bool {
+        self.map.get(&id).map_or(true, ty_is_copy)
     }
 
     /// Number of typed expression nodes. Used by the back-end (Phase 4+).
@@ -278,6 +280,39 @@ fn display_ty(t: &Ty) -> String {
         Ty::Future(t) => format!("async {}", display_ty(t)),
         Ty::Param(n) => n.clone(),
         Ty::Unknown => "_".into(),
+    }
+}
+
+/// Is a value of type `t` implicitly copyable (Section 9 `Copy`)? Scalars,
+/// `nil`, references, raw pointers, slices, ranges, and `fn` are Copy; owned
+/// heap data (`str`, `List`/`Map`/`Set`, structs, enums, futures, unions) is
+/// move-only. Aggregates are Copy exactly when every element is. `Unknown` and
+/// generic `Param` are treated as Copy so the borrow checker stays lenient on
+/// types it cannot fully model.
+fn ty_is_copy(t: &Ty) -> bool {
+    use Ty::*;
+    match t {
+        Bool
+        | Int(_)
+        | IntLit
+        | Float(_)
+        | FloatLit
+        | Char
+        | Unit
+        | Never
+        | Nil
+        | Ref(_)
+        | Ptr(_)
+        | Slice(_)
+        | Range(_)
+        | Fn(_, _)
+        | Unknown
+        | Param(_) => true,
+        Tuple(xs) => xs.iter().all(ty_is_copy),
+        Array(e, _) => ty_is_copy(e),
+        Str | List(_) | Map(_, _) | Set(_) | Struct(_, _) | Enum(_, _) | Future(_) | Union(_) => {
+            false
+        }
     }
 }
 

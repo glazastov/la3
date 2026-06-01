@@ -10,6 +10,7 @@
 //!   la3 build <file.la3>   compile to a native binary (WIP, see COMPILER_PLAN.md)
 
 mod ast;
+mod borrowck;
 mod checker;
 mod diag;
 mod interp;

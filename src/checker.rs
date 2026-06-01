@@ -22,7 +22,14 @@ pub fn check(prog: &Program) -> Vec<Diagnostic> {
     // Only run the type pass when names all resolve, so undefined-name noise
     // does not produce confusing downstream type errors.
     if errors.is_empty() {
-        errors.extend(crate::typeck::check(prog));
+        let table = crate::typeck::check_types(prog);
+        if table.errors.is_empty() {
+            // Ownership/borrow checking needs a reliable type table, so it only
+            // runs once names and types are clean (reference Section 11).
+            errors.extend(crate::borrowck::check(prog, &table));
+        } else {
+            errors.extend(table.errors);
+        }
     }
     errors.sort_by_key(|d| (d.pos.line, d.pos.col));
     errors

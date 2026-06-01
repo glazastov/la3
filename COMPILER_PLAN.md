@@ -68,15 +68,32 @@ Prerequisite for everything. The light `typeck` becomes the source of truth.
 - [x] 1.4 Exact `as` semantics — type checker now validates cast legality (`TypeChecker::check_cast`): `as` converts numeric↔numeric and integer↔`char` only, rejecting e.g. `str as i32`/`bool as f64` (lenient on `Unknown`/generic/pointer/ref). Runtime exactness confirmed/fixed: `/` truncates toward zero, `%` takes the left sign, `**`→`f64`, `as` truncates+sign via `mask_int`/`mask_uint` and float→int `trunc()`; **fixed `idiv`** (floor `//`) which used `div_euclid` and was wrong for a negative divisor (`idiv(7,-2)` now `-4`). Battery: `tests/casts.rs`
 - [x] 1.5 Sound inference — unconstrained literals now default to `i32`/`f64` (`relations::default_ty`, applied to the finished `TypeTable` in `check_types`); contextual **pinning** (`TypeChecker::pin_literals`) records annotated literals at their target width (`let x: u8 = 42`, array elements, call arguments) instead of the default. No implicit widening/narrowing (already enforced by `assignable`) confirmed with real type errors. Battery: `tests/inference.rs`
 
-## Phase 1.6 — Ownership & borrow checker · STATUS: [ ] ← user decision 2026-06-01 (replaces ARC)
+## Phase 1.6 — Ownership & borrow checker · STATUS: [~] in progress ← user decision 2026-06-01 (replaces ARC)
 
-Full Rust-style ownership, checked statically. The interpreter (`Rc`-based) stays the
-oracle; ownership is a compile-time analysis the back-end relies on for deterministic
-drop. Seeds already present: `check_borrow_conflicts` (aliasing-xor-mutability on call
-args), `borrow_root`, `unsafe_depth`. Likely subparts (to refine next session):
+Full Rust-style ownership, checked statically by a new `borrowck` pass that runs from
+`checker::check` after a clean type check (so it has a reliable `TypeTable`). The
+interpreter (`Rc`-based) stays the oracle; ownership is a compile-time analysis the
+back-end relies on for deterministic drop. Seeds already present: `check_borrow_conflicts`
+(aliasing-xor-mutability on call args), `borrow_root`, `unsafe_depth`.
 
-- [ ] 1.6.1 Move semantics: track moved-out bindings; **use-after-move** is an error; `move` closures take ownership of captures
-- [ ] 1.6.2 Borrows: `&T`/`&mut T` exclusivity beyond single calls (a live `&mut` forbids other borrows); reborrow rules
+**Design decisions (recorded 2026-06-01):**
+- _Copy vs move_ (`TypeTable::is_copy`): scalars (`bool`/ints/floats/`char`/`()`), `nil`,
+  references `&T`, raw pointers `*T`, slices `&[T]`, ranges, and `fn` are **Copy**;
+  `str`, `List`/`Map`/`Set`, tuples/arrays *of non-Copy*, structs, enums, futures, and
+  unions are **move**. `Unknown`/generic `Param` are treated as Copy (lenient — never
+  invent a move on a type we don't fully model).
+- _What moves a value_: only **unambiguous** moves where the caller syntax alone decides
+  it — `let y = x` and `x = y` (whole-binding) and (1.6.2) `move`-closure captures. A
+  `&x`/`&mut x` is a borrow, not a move. **Argument/receiver moves are deferred to 1.6.2**
+  because they need callee/`self` signatures (e.g. `m.get(word)` borrows `word`,
+  `xs.map(..)` borrows the receiver — proven by the examples, which reuse both).
+- _Flow_: analysis is flow-sensitive — straight-line threading, `if`/`match` branch
+  **union** (moved in any branch ⇒ moved after, matching Rust), and a two-pass loop check
+  (a value moved in one iteration and used in the next is an error). `let`/`=` re-init
+  clears the moved mark.
+
+- [x] 1.6.1 Move semantics — `borrowck` pass + `TypeTable::is_copy`; moves via `let y = x` / `x = y`; **use-after-move** is an error, flow-sensitive (branch union + two-pass loops). Argument/receiver moves and `move`-closure captures deferred to 1.6.2. Battery: `tests/ownership.rs`
+- [ ] 1.6.2 Argument & receiver moves (by-value param ⇒ move; `self`/`mut self` receiver ⇒ move; `&`/`&mut` borrow) · `move`-closure captures · `&T`/`&mut T` exclusivity beyond single calls (a live `&mut` forbids other borrows); reborrow rules
 - [ ] 1.6.3 Lifetimes: a reference may not outlive its referent (reject returning/storing a borrow of a local)
 - [ ] 1.6.4 Drop & ownership-aware codegen contract (deterministic destruction order; what MIR must carry)
 
@@ -148,4 +165,5 @@ args), `borrow_root`, `unsafe_depth`. Likely subparts (to refine next session):
 - 2026-05-31 — **Phase 1.3 done.** By-value layout (`size_align`, `aggregate_sa`, `enum_layout_info`): C-style aggregates, tagged-union enums (incl. built-in `Option`/`Result`), fixed arrays, heap handles pointer-sized, slices as fat pointers. Fixed a real gap — the parser discarded enum-variant payload types, so `VariantKind` now stores `TypeExpr`s. New `la3 layout` command + 9-test battery (`tests/layout.rs`). 69 tests pass.
 - 2026-06-01 — **Refactor (modularization).** Split the two remaining monoliths into focused submodules, mirroring the earlier `parser/`+`typeck/` split: `interp.rs` 2984→854 lines over `src/interp/{stmts,exprs,matching,loops,concurrency,calls,convert,builtins}.rs`; `typeck.rs` 1862→351 lines over `src/typeck/{collect,driver,stmts,infer,calls,control}.rs` (alongside the existing `builtins`/`layout`/`relations`). Pure reorganization (`use super::*;`, methods `pub(super)`), no behavior change. 69 tests still pass.
 - 2026-06-01 — **Phase 1.4 done.** `as` cast legality enforced statically (`TypeChecker::check_cast`): numeric↔numeric and integer↔`char` only; `str as i32`/`bool as f64` are now type errors (lenient on `Unknown`/generic/pointer/ref). Confirmed runtime exactness for `/` (trunc toward zero), `%` (left sign), `**`→`f64`, and `as` truncation/sign; **fixed `idiv`** floor division, which used `div_euclid` and rounded wrong for a negative divisor (`idiv(7,-2)`: −3 → −4). New battery `tests/casts.rs` (10 tests). 79 tests pass.
+- 2026-06-01 — **Phase 1.6.1 done.** New `borrowck` pass ([src/borrowck.rs](src/borrowck.rs)), run from `checker::check` after a clean type check (so `la3 check`/`run`/`build` all enforce it). Move semantics: `TypeTable::is_copy` classifies Copy vs move types; `let y = x` / `x = y` of a non-Copy binding moves it, and a later read is **use-after-move**. Flow-sensitive: `if`/`match` branch union + two-pass loop check; `let`/`=` re-init clears the mark. Argument/receiver moves and `move`-closure captures are deferred to 1.6.2 (proven necessary: `xs.map(..)` borrows its receiver and `m.get(k)` borrows its arg, so the examples reuse both). Zero false positives across all examples. New battery `tests/ownership.rs` (10 tests). 98 tests pass. Awaiting review before 1.6.2.
 - 2026-06-01 — **Phase 1 complete.** **1.5 done:** literal defaulting (`relations::default_ty` over the finished table) + contextual pinning (`TypeChecker::pin_literals` at `let`-with-annotation, `return`, and call args) — `la3 types` is now fully concrete, no `{integer}`/`{float}` left; no-implicit-widening confirmed with real errors. New battery `tests/inference.rs` (9 tests). 88 tests pass. **Decision:** user chose full **Ownership** (move + borrow checker, deterministic drop) over the earlier ARC plan — decision table + cuts updated, new **Phase 1.6** added. Awaiting review before Phase 1.6.
