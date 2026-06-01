@@ -189,3 +189,26 @@ fn passing_a_struct_by_value_then_using_it_is_rejected() {
         "use of moved value `req`",
     );
 }
+
+// ---------------------------------------------------------------------------
+// 1.6.3 — `move`-closure captures
+// ---------------------------------------------------------------------------
+
+#[test]
+fn move_closure_captures_are_moved() {
+    rejects(
+        "fn main() { let a = [1, 2, 3]; let f = move || a.len(); io.println(f()); io.println(a) }",
+        "use of moved value `a`",
+    );
+}
+
+#[test]
+fn non_move_closure_borrows_its_captures() {
+    ok("fn main() { let a = [1, 2, 3]; let f = || a.len(); io.println(f()); io.println(a) }");
+}
+
+#[test]
+fn move_closure_capturing_a_copy_value_is_fine() {
+    // An `i32` is `Copy`, so a `move` closure copies it — the original stays usable.
+    ok("fn main() { let n = 7; let f = move || n + 1; io.println(f()); io.println(n) }");
+}
