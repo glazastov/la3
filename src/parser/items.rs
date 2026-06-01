@@ -75,6 +75,7 @@ impl Parser {
         self.expect(&Tok::LParen, "'('")?;
         let mut params = Vec::new();
         let mut variadic = None;
+        let mut self_kind = SelfKind::None;
         while !self.at(&Tok::RParen) {
             if self.eat(&Tok::DotDot) {
                 // `...name: T` variadic (spelled `..` here after newline filter)
@@ -84,6 +85,7 @@ impl Parser {
                 self.bump();
                 let _m = self.eat(&Tok::Mut);
                 if self.eat(&Tok::SelfKw) {
+                    self_kind = SelfKind::Ref; // `&self` / `&mut self` borrows
                     params.push(Param {
                         name: "self".into(),
                         ty: None,
@@ -100,6 +102,7 @@ impl Parser {
             if self.at(&Tok::Mut) && matches!(self.peek_at(1), Tok::SelfKw) {
                 self.bump();
                 self.bump();
+                self_kind = SelfKind::Value; // `mut self` takes the receiver by value
                 params.push(Param {
                     name: "self".into(),
                     ty: None,
@@ -111,6 +114,7 @@ impl Parser {
                 continue;
             }
             if self.eat(&Tok::SelfKw) {
+                self_kind = SelfKind::Value; // `self` takes the receiver by value
                 params.push(Param {
                     name: "self".into(),
                     ty: None,
@@ -158,6 +162,7 @@ impl Parser {
             ret,
             body,
             is_async,
+            self_kind,
             pos,
         })
     }

@@ -15,7 +15,7 @@ struct Response {
     body: str,
 }
 
-fn route(req: Request) -> Response {
+fn route(req: &Request) -> Response {
     match (req.method, req.path) {
         (Method.Get, "/")        => Response { status: 200, body: "welcome to La3" },
         (Method.Get, "/health")  => Response { status: 200, body: "ok" },
@@ -34,7 +34,7 @@ fn main() {
     ]
 
     for req in inbox {
-        let resp = route(req)
+        let resp = route(&req)
         io.println(f"{resp.status} {req.path} -> {resp.body}")
     }
 }

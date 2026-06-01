@@ -49,6 +49,19 @@ pub enum Item {
     Interface(InterfaceDecl),
 }
 
+/// How a method takes its receiver (reference Section 6). The borrow checker
+/// needs this: `self`/`mut self` *consume* the receiver, `&self`/`&mut self`
+/// only *borrow* it. Free functions and associated functions have no receiver.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SelfKind {
+    /// No `self` receiver (a free or associated function).
+    None,
+    /// `self` or `mut self` — takes the receiver by value (consumes it).
+    Value,
+    /// `&self` or `&mut self` — borrows the receiver.
+    Ref,
+}
+
 #[derive(Clone, Debug)]
 pub struct FnDecl {
     pub name: String,
@@ -60,6 +73,8 @@ pub struct FnDecl {
     pub ret: Option<TypeExpr>,
     pub body: Block,
     pub is_async: bool,
+    /// Receiver form, for the borrow checker (`None` for non-methods).
+    pub self_kind: SelfKind,
     pub pos: Pos,
 }
 

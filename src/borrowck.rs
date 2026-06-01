@@ -4,12 +4,20 @@
 //! clean type check (so it has a reliable [`TypeTable`]) and enforces the parts
 //! of that model the compiler back-end will rely on for deterministic drop.
 //!
-//! **1.6.1 (this slice): move semantics + use-after-move.** A *move* transfers
+//! **Move semantics + use-after-move (1.6.1–1.6.2).** A *move* transfers
 //! ownership out of a binding; using the binding afterward is an error unless
-//! the type is [`Copy`](TypeTable::is_copy). Only the unambiguous moves are
-//! tracked here — `let y = x` and `x = y`, where the syntax alone decides the
-//! move. By-value argument/receiver moves and `move`-closure captures need
-//! callee signatures and land in 1.6.2; `&x`/`&mut x` are borrows, never moves.
+//! the type is [`Copy`](TypeTable::is_copy). Moves happen at:
+//! - `let y = x` / `x = y` — whole-binding moves (1.6.1);
+//! - **by-value arguments** to a user function/method — `f(x)` moves `x` when the
+//!   matching parameter is taken by value (not `&T`/`&[T]`/`*T`) (1.6.2);
+//! - **consuming receivers** — `x.m()` moves `x` when `m` takes `self`/`mut self`
+//!   (1.6.2).
+//!
+//! `&x`/`&mut x` are borrows, never moves. Calls to the built-in stdlib borrow
+//! their arguments and receiver (their signatures aren't user-declared, and the
+//! examples reuse values after passing them to `io.println`, `to_hex`, `.map`,
+//! `.get`, …), so only **user-declared** functions/methods move. `move`-closure
+//! captures and `&mut` exclusivity are still to come.
 //!
 //! The analysis is flow-sensitive: it threads a set of moved-out bindings through
 //! straight-line code, takes the **union** across `if`/`match` branches (a value
@@ -17,7 +25,7 @@
 //! twice so a value moved in one iteration and used in the next is caught. A
 //! later `let`/`=` re-initializes a binding and clears its moved mark.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 use crate::diag::{Diagnostic, Phase, Pos};
@@ -28,6 +36,7 @@ use crate::typeck::TypeTable;
 pub fn check(prog: &Program, types: &TypeTable) -> Vec<Diagnostic> {
     let mut bc = BorrowCk {
         types,
+        sigs: collect_sigs(prog),
         errors: Vec::new(),
     };
     for item in &prog.items {
@@ -52,8 +61,79 @@ pub fn check(prog: &Program, types: &TypeTable) -> Vec<Diagnostic> {
 /// The set of bindings that have been moved out and not since re-initialized.
 type Moved = HashSet<String>;
 
+/// Call signatures collected from the program, so a call site can tell which
+/// arguments/receivers are taken by value (a move) versus borrowed. Only
+/// user-declared functions and methods appear here; anything absent is a
+/// built-in and borrows.
+struct Sigs {
+    /// Free function name → per-parameter "taken by value" flags.
+    free_fns: HashMap<String, Vec<bool>>,
+    /// (type, method) → (receiver form, per-parameter "by value" flags).
+    methods: HashMap<(String, String), (SelfKind, Vec<bool>)>,
+    /// Declared struct/enum names, to spot type-qualified calls (`Type.assoc()`).
+    type_names: HashSet<String>,
+}
+
+/// Is a parameter of this type taken by value (so a bare-binding argument is
+/// moved)? References, slices, and raw pointers borrow; everything else owns.
+fn is_by_value_ty(t: &TypeExpr) -> bool {
+    !matches!(
+        t,
+        TypeExpr::Ref { .. } | TypeExpr::Slice(_) | TypeExpr::Ptr { .. }
+    )
+}
+
+/// The by-value flags for a function's non-`self` parameters. An untyped
+/// parameter is treated as borrowing (lenient — never invent a move).
+fn by_value_params(f: &FnDecl) -> Vec<bool> {
+    f.params
+        .iter()
+        .filter(|p| !p.is_self)
+        .map(|p| p.ty.as_ref().is_some_and(is_by_value_ty))
+        .collect()
+}
+
+fn collect_sigs(prog: &Program) -> Sigs {
+    let mut free_fns = HashMap::new();
+    let mut methods = HashMap::new();
+    let mut type_names = HashSet::new();
+    for item in &prog.items {
+        match item {
+            Item::Fn(f) => {
+                free_fns.insert(f.name.clone(), by_value_params(f));
+            }
+            Item::Impl(b) => {
+                for m in &b.methods {
+                    methods.insert(
+                        (b.ty.clone(), m.name.clone()),
+                        (m.self_kind, by_value_params(m)),
+                    );
+                }
+            }
+            Item::Struct(s) => {
+                type_names.insert(s.name.clone());
+            }
+            Item::Enum(e) => {
+                type_names.insert(e.name.clone());
+            }
+            _ => {}
+        }
+    }
+    Sigs {
+        free_fns,
+        methods,
+        type_names,
+    }
+}
+
+/// The nominal head of a rendered type (`List<i32>` → `List`, `Point` → `Point`).
+fn head_name(rendered: &str) -> &str {
+    rendered.split('<').next().unwrap_or(rendered)
+}
+
 struct BorrowCk<'a> {
     types: &'a TypeTable,
+    sigs: Sigs,
     errors: Vec<Diagnostic>,
 }
 
@@ -110,6 +190,15 @@ impl BorrowCk<'_> {
         if let ExprKind::Ident(name) = &e.kind {
             if !self.types.is_copy(e.id) {
                 moved.insert(name.clone());
+            }
+        }
+    }
+
+    /// Move each argument whose matching parameter is taken by value.
+    fn move_by_value_args(&mut self, args: &[Expr], by_value: &[bool], moved: &mut Moved) {
+        for (a, &by_val) in args.iter().zip(by_value) {
+            if by_val {
+                self.try_move(a, moved);
             }
         }
     }
@@ -175,11 +264,46 @@ impl BorrowCk<'_> {
                 for a in args {
                     self.walk_expr(a, moved);
                 }
+                // A bare-binding argument to a user function is moved when the
+                // matching parameter is by value. Built-ins (absent here) borrow.
+                if let ExprKind::Ident(name) = &callee.kind {
+                    if let Some(flags) = self.sigs.free_fns.get(name).cloned() {
+                        self.move_by_value_args(args, &flags, moved);
+                    }
+                }
             }
-            ExprKind::MethodCall { recv, args, .. } => {
+            ExprKind::MethodCall {
+                recv, method, args, ..
+            } => {
                 self.walk_expr(recv, moved);
                 for a in args {
                     self.walk_expr(a, moved);
+                }
+                // Resolve the receiver's type. `Type.assoc(..)` (recv is a known
+                // type name) has no value receiver; otherwise the receiver is a
+                // value whose type the checker recorded.
+                let type_qualified = matches!(&recv.kind,
+                    ExprKind::Ident(n) if self.sigs.type_names.contains(n));
+                let tyname = if type_qualified {
+                    match &recv.kind {
+                        ExprKind::Ident(n) => Some(n.clone()),
+                        _ => None,
+                    }
+                } else {
+                    self.types
+                        .type_of(recv.id)
+                        .map(|t| head_name(&t).to_string())
+                };
+                if let Some(ty) = tyname {
+                    if let Some((self_kind, flags)) =
+                        self.sigs.methods.get(&(ty, method.clone())).cloned()
+                    {
+                        // A consuming method called on a value moves the receiver.
+                        if self_kind == SelfKind::Value && !type_qualified {
+                            self.try_move(recv, moved);
+                        }
+                        self.move_by_value_args(args, &flags, moved);
+                    }
                 }
             }
             ExprKind::Field { recv, .. } => self.walk_expr(recv, moved),
@@ -316,6 +440,11 @@ impl BorrowCk<'_> {
         let mut second = entry;
         for v in probe.difference(moved) {
             second.insert(v.clone());
+        }
+        // The loop's own pattern is re-bound every iteration, so its names are
+        // never carried (a `for s in xs` body may move `s` each time).
+        if let Some(p) = pattern {
+            bind_fresh(p, &mut second);
         }
         self.walk_block(body, &mut second);
 

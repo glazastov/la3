@@ -120,11 +120,11 @@ fn move_in_a_loop_then_reuse_is_rejected() {
 }
 
 // ---------------------------------------------------------------------------
-// Out of scope for 1.6.1 (must NOT be flagged as moves yet)
+// Built-ins always borrow (never move their args/receiver)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn passing_to_a_method_does_not_move_the_receiver() {
+fn passing_to_a_builtin_method_does_not_move_the_receiver() {
     // `xs.map(..)` borrows the receiver; reusing `xs` is fine.
     ok(
         "fn main() { let xs = [1, 2, 3]; let ys = xs.map(|x| x * 2); io.println(xs); io.println(ys) }",
@@ -136,5 +136,56 @@ fn reusing_an_argument_in_the_same_call_is_fine() {
     // The word_count idiom: `m.get(k)` borrows `k`, so `m[k]` after is fine.
     ok(
         "fn main() { let mut m: Map<str, i64> = {}; let k = \"a\"; m[k] = m.get(k).unwrap_or(0) + 1; io.println(m.len()) }",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 1.6.2 — argument & receiver moves (user functions/methods)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn by_value_argument_to_a_user_fn_moves() {
+    rejects(
+        "fn take(x: List<i32>) -> i32 { x.len() as i32 }\n\
+         fn main() { let a = [1, 2, 3]; let n = take(a); io.println(a); io.println(n) }",
+        "use of moved value `a`",
+    );
+}
+
+#[test]
+fn borrowed_argument_does_not_move() {
+    ok(
+        "fn take(x: &List<i32>) -> i32 { x.len() as i32 }\n\
+         fn main() { let a = [1, 2, 3]; let n = take(&a); io.println(a); io.println(n) }",
+    );
+}
+
+#[test]
+fn consuming_method_moves_the_receiver() {
+    rejects(
+        "struct B { v: List<i32> }\n\
+         impl B { fn eat(self) -> i32 { self.v.len() as i32 } }\n\
+         fn main() { let b = B { v: [1, 2] }; let n = b.eat(); io.println(b.v); io.println(n) }",
+        "use of moved value `b`",
+    );
+}
+
+#[test]
+fn ref_self_method_does_not_move_the_receiver() {
+    ok(
+        "struct B { v: List<i32> }\n\
+         impl B { fn size(&self) -> i32 { self.v.len() as i32 } }\n\
+         fn main() { let b = B { v: [1, 2] }; let n = b.size(); let m = b.size(); io.println(n + m) }",
+    );
+}
+
+#[test]
+fn passing_a_struct_by_value_then_using_it_is_rejected() {
+    // The http_server bug: `route(req)` consumes `req`, then `req.path` is read.
+    rejects(
+        "struct R { path: str }\n\
+         fn route(r: R) -> str { r.path }\n\
+         fn main() { let req = R { path: \"/\" }; let p = route(req); io.println(p); io.println(req.path) }",
+        "use of moved value `req`",
     );
 }

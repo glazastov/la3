@@ -138,7 +138,12 @@ impl Interp {
                 return Ok(v);
             }
         }
-        let obj = self.eval(recv, env)?;
+        let mut obj = self.eval(recv, env)?;
+        // A reference is transparent for field access (`r.field` reaches through
+        // `&T`/`&mut T` to the pointee), matching the safe-reference model.
+        while let Value::Ref(cell, _) = obj {
+            obj = cell.borrow().clone();
+        }
         if optional && matches!(obj, Value::Nil) {
             return Ok(Value::Nil);
         }
