@@ -77,7 +77,7 @@ impl Parser {
         match self.toks.get(j).map(|t| &t.tok) {
             Some(Tok::RBrace) => return false,
             Some(Tok::Let | Tok::Return | Tok::Break | Tok::Continue | Tok::Const | Tok::Fn) => {
-                return true
+                return true;
             }
             _ => {}
         }

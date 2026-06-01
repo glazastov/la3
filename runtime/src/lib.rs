@@ -45,7 +45,10 @@ pub struct RcHeader {
 
 impl RcHeader {
     pub fn new(tag: Tag) -> Self {
-        RcHeader { strong: AtomicUsize::new(1), tag }
+        RcHeader {
+            strong: AtomicUsize::new(1),
+            tag,
+        }
     }
 }
 

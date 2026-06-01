@@ -29,8 +29,8 @@ use crate::diag::{Diagnostic, Phase, Pos};
 mod builtins;
 mod layout;
 mod relations;
-pub use layout::*;
 use builtins::*;
+pub use layout::*;
 use relations::*;
 
 pub fn check(prog: &Program) -> Vec<Diagnostic> {
@@ -940,11 +940,7 @@ impl TypeChecker {
                     t = join(&t, b);
                     any = true;
                 }
-                if any {
-                    t
-                } else {
-                    Ty::Unit
-                }
+                if any { t } else { Ty::Unit }
             }
             ExprKind::While { cond, body } => {
                 let c = self.infer(cond);
@@ -1103,8 +1099,7 @@ impl TypeChecker {
             }
             // `p ± n` → same pointer type
             if matches!(&l, Ty::Ptr(_)) {
-                let offset_ok =
-                    r.is_int() || r.is_unknown() || matches!(&r, Ty::Param(_));
+                let offset_ok = r.is_int() || r.is_unknown() || matches!(&r, Ty::Param(_));
                 if !offset_ok {
                     self.err(
                         pos,
@@ -1119,8 +1114,7 @@ impl TypeChecker {
             }
             // `n + p` → same pointer type (commutative add only)
             if matches!(&r, Ty::Ptr(_)) && matches!(op, Add) {
-                let offset_ok =
-                    l.is_int() || l.is_unknown() || matches!(&l, Ty::Param(_));
+                let offset_ok = l.is_int() || l.is_unknown() || matches!(&l, Ty::Param(_));
                 if !offset_ok {
                     self.err(
                         pos,
@@ -1501,11 +1495,7 @@ impl TypeChecker {
                 } else if let Ty::Tuple(ts) = &base {
                     self.err(
                         pos,
-                        format!(
-                            "no field `{}` on tuple of {} element(s)",
-                            name,
-                            ts.len()
-                        ),
+                        format!("no field `{}` on tuple of {} element(s)", name, ts.len()),
                     );
                 }
                 wrap_optional(Ty::Unknown, optional)
@@ -1733,11 +1723,7 @@ impl TypeChecker {
                         continue;
                     }
                     if let Pattern::Bool(b) = a.pattern {
-                        if b {
-                            t = true
-                        } else {
-                            f = true
-                        }
+                        if b { t = true } else { f = true }
                     }
                 }
                 if !(t && f) {
@@ -1873,5 +1859,4 @@ impl TypeChecker {
             );
         }
     }
-
 }

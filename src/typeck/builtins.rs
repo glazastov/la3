@@ -198,4 +198,3 @@ pub(super) fn builtin_method_sig(recv: &Ty, method: &str) -> Option<(Vec<Ty>, Ty
         _ => return None,
     })
 }
-

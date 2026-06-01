@@ -200,4 +200,3 @@ fn memory_example_runs_cleanly() {
     let (_out, err, ok) = run(&["run", p]);
     assert!(ok, "memory.la3 failed:\n{}", err);
 }
-

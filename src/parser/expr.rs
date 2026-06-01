@@ -32,7 +32,8 @@ impl Parser {
                     let pos = lhs.pos;
                     self.bump();
                     let value = self.parse_bp(1)?;
-                    lhs = Expr { id: NodeId::DUMMY,
+                    lhs = Expr {
+                        id: NodeId::DUMMY,
                         kind: ExprKind::Assign {
                             target: Box::new(lhs),
                             op: aop,
@@ -56,7 +57,8 @@ impl Parser {
                 let pos = lhs.pos;
                 self.bump();
                 let ty = self.parse_type()?;
-                lhs = Expr { id: NodeId::DUMMY,
+                lhs = Expr {
+                    id: NodeId::DUMMY,
                     kind: ExprKind::Cast {
                         expr: Box::new(lhs),
                         ty,
@@ -79,7 +81,8 @@ impl Parser {
             match kind {
                 InfixKind::Coalesce => {
                     let rhs = self.parse_bp(r_bp)?;
-                    lhs = Expr { id: NodeId::DUMMY,
+                    lhs = Expr {
+                        id: NodeId::DUMMY,
                         kind: ExprKind::Coalesce {
                             lhs: Box::new(lhs),
                             rhs: Box::new(rhs),
@@ -89,7 +92,8 @@ impl Parser {
                 }
                 InfixKind::Range(inclusive) => {
                     let rhs = self.parse_bp(r_bp)?;
-                    lhs = Expr { id: NodeId::DUMMY,
+                    lhs = Expr {
+                        id: NodeId::DUMMY,
                         kind: ExprKind::Range {
                             start: Box::new(lhs),
                             end: Box::new(rhs),
@@ -100,7 +104,8 @@ impl Parser {
                 }
                 InfixKind::Binary(op) => {
                     let rhs = self.parse_bp(r_bp)?;
-                    lhs = Expr { id: NodeId::DUMMY,
+                    lhs = Expr {
+                        id: NodeId::DUMMY,
                         kind: ExprKind::Binary {
                             op,
                             lhs: Box::new(lhs),
@@ -127,7 +132,8 @@ impl Parser {
                     // `&raw expr`
                     self.bump();
                     let expr = self.parse_bp(29)?;
-                    return Ok(Expr { id: NodeId::DUMMY,
+                    return Ok(Expr {
+                        id: NodeId::DUMMY,
                         kind: ExprKind::Unary {
                             op: UnOp::RawRef,
                             expr: Box::new(expr),
@@ -141,7 +147,8 @@ impl Parser {
                     UnOp::Ref
                 };
                 let expr = self.parse_bp(29)?;
-                return Ok(Expr { id: NodeId::DUMMY,
+                return Ok(Expr {
+                    id: NodeId::DUMMY,
                     kind: ExprKind::Unary {
                         op,
                         expr: Box::new(expr),
@@ -154,7 +161,8 @@ impl Parser {
         if let Some(op) = op {
             self.bump();
             let expr = self.parse_bp(29)?;
-            return Ok(Expr { id: NodeId::DUMMY,
+            return Ok(Expr {
+                id: NodeId::DUMMY,
                 kind: ExprKind::Unary {
                     op,
                     expr: Box::new(expr),
@@ -175,7 +183,8 @@ impl Parser {
                     // tuple index like `.0`
                     if let Tok::Int(n) = self.peek().clone() {
                         self.bump();
-                        lhs = Expr { id: NodeId::DUMMY,
+                        lhs = Expr {
+                            id: NodeId::DUMMY,
                             kind: ExprKind::Field {
                                 recv: Box::new(lhs),
                                 optional,
@@ -200,7 +209,8 @@ impl Parser {
                     }
                     if self.at(&Tok::LParen) {
                         let args = self.parse_args()?;
-                        lhs = Expr { id: NodeId::DUMMY,
+                        lhs = Expr {
+                            id: NodeId::DUMMY,
                             kind: ExprKind::MethodCall {
                                 recv: Box::new(lhs),
                                 optional,
@@ -211,7 +221,8 @@ impl Parser {
                             pos,
                         };
                     } else {
-                        lhs = Expr { id: NodeId::DUMMY,
+                        lhs = Expr {
+                            id: NodeId::DUMMY,
                             kind: ExprKind::Field {
                                 recv: Box::new(lhs),
                                 optional,
@@ -223,7 +234,8 @@ impl Parser {
                 }
                 Tok::LParen => {
                     let args = self.parse_args()?;
-                    lhs = Expr { id: NodeId::DUMMY,
+                    lhs = Expr {
+                        id: NodeId::DUMMY,
                         kind: ExprKind::Call {
                             callee: Box::new(lhs),
                             args,
@@ -235,7 +247,8 @@ impl Parser {
                     self.bump();
                     let index = self.parse_expr()?;
                     self.expect(&Tok::RBracket, "']'")?;
-                    lhs = Expr { id: NodeId::DUMMY,
+                    lhs = Expr {
+                        id: NodeId::DUMMY,
                         kind: ExprKind::Index {
                             recv: Box::new(lhs),
                             index: Box::new(index),
@@ -245,7 +258,8 @@ impl Parser {
                 }
                 Tok::Question => {
                     self.bump();
-                    lhs = Expr { id: NodeId::DUMMY,
+                    lhs = Expr {
+                        id: NodeId::DUMMY,
                         kind: ExprKind::Try(Box::new(lhs)),
                         pos,
                     };
@@ -273,7 +287,8 @@ impl Parser {
                             _ => return self.err("invalid path"),
                         };
                         segs.push(seg);
-                        lhs = Expr { id: NodeId::DUMMY,
+                        lhs = Expr {
+                            id: NodeId::DUMMY,
                             kind: ExprKind::Path(segs),
                             pos,
                         };
@@ -394,7 +409,8 @@ impl Parser {
             Tok::LParen => {
                 self.bump();
                 if self.eat(&Tok::RParen) {
-                    return Ok(Expr { id: NodeId::DUMMY,
+                    return Ok(Expr {
+                        id: NodeId::DUMMY,
                         kind: ExprKind::Tuple(vec![]),
                         pos,
                     });
@@ -409,7 +425,8 @@ impl Parser {
                         }
                     }
                     self.expect(&Tok::RParen, "')'")?;
-                    return Ok(Expr { id: NodeId::DUMMY,
+                    return Ok(Expr {
+                        id: NodeId::DUMMY,
                         kind: ExprKind::Tuple(parts),
                         pos,
                     });
@@ -422,7 +439,8 @@ impl Parser {
                 if self.brace_is_block() {
                     let b = self.parse_block()?;
                     let bpos = b.pos;
-                    return Ok(Expr { id: NodeId::DUMMY,
+                    return Ok(Expr {
+                        id: NodeId::DUMMY,
                         kind: ExprKind::Block(b),
                         pos: bpos,
                     });
@@ -461,13 +479,18 @@ impl Parser {
             Tok::Try => return self.parse_try_catch(),
             other => return self.err(format!("expected expression, found {:?}", other)),
         };
-        Ok(Expr { id: NodeId::DUMMY, kind, pos })
+        Ok(Expr {
+            id: NodeId::DUMMY,
+            kind,
+            pos,
+        })
     }
 
     pub(super) fn parse_list(&mut self, pos: Pos) -> Result<Expr> {
         self.bump(); // [
         if self.eat(&Tok::RBracket) {
-            return Ok(Expr { id: NodeId::DUMMY,
+            return Ok(Expr {
+                id: NodeId::DUMMY,
                 kind: ExprKind::List(vec![]),
                 pos,
             });
@@ -476,7 +499,8 @@ impl Parser {
         if self.eat(&Tok::Semicolon) {
             let count = self.parse_expr()?;
             self.expect(&Tok::RBracket, "']'")?;
-            return Ok(Expr { id: NodeId::DUMMY,
+            return Ok(Expr {
+                id: NodeId::DUMMY,
                 kind: ExprKind::ListRepeat {
                     value: Box::new(first),
                     count: Box::new(count),
@@ -494,7 +518,8 @@ impl Parser {
             }
         }
         self.expect(&Tok::RBracket, "']'")?;
-        Ok(Expr { id: NodeId::DUMMY,
+        Ok(Expr {
+            id: NodeId::DUMMY,
             kind: ExprKind::List(items),
             pos,
         })
@@ -504,7 +529,8 @@ impl Parser {
     pub(super) fn parse_brace_collection(&mut self, pos: Pos) -> Result<Expr> {
         self.bump(); // {
         if self.eat(&Tok::RBrace) {
-            return Ok(Expr { id: NodeId::DUMMY,
+            return Ok(Expr {
+                id: NodeId::DUMMY,
                 kind: ExprKind::Map(vec![]),
                 pos,
             });
@@ -523,7 +549,8 @@ impl Parser {
                 entries.push((k, val));
             }
             self.expect(&Tok::RBrace, "'}'")?;
-            Ok(Expr { id: NodeId::DUMMY,
+            Ok(Expr {
+                id: NodeId::DUMMY,
                 kind: ExprKind::Map(entries),
                 pos,
             })
@@ -536,7 +563,8 @@ impl Parser {
                 items.push(self.parse_expr()?);
             }
             self.expect(&Tok::RBrace, "'}'")?;
-            Ok(Expr { id: NodeId::DUMMY,
+            Ok(Expr {
+                id: NodeId::DUMMY,
                 kind: ExprKind::Set(items),
                 pos,
             })
@@ -559,7 +587,8 @@ impl Parser {
                 self.parse_expr()?
             } else {
                 // shorthand `{ x }` == `{ x: x }`
-                Expr { id: NodeId::DUMMY,
+                Expr {
+                    id: NodeId::DUMMY,
                     kind: ExprKind::Ident(fname.clone()),
                     pos,
                 }
@@ -571,7 +600,8 @@ impl Parser {
             self.skip_terminators();
         }
         self.expect(&Tok::RBrace, "'}'")?;
-        Ok(Expr { id: NodeId::DUMMY,
+        Ok(Expr {
+            id: NodeId::DUMMY,
             kind: ExprKind::StructLit {
                 name,
                 fields,
@@ -592,7 +622,8 @@ impl Parser {
             } else {
                 let b = self.parse_block()?;
                 let bpos = b.pos;
-                Some(Box::new(Expr { id: NodeId::DUMMY,
+                Some(Box::new(Expr {
+                    id: NodeId::DUMMY,
                     kind: ExprKind::Block(b),
                     pos: bpos,
                 }))
@@ -600,7 +631,8 @@ impl Parser {
         } else {
             None
         };
-        Ok(Expr { id: NodeId::DUMMY,
+        Ok(Expr {
+            id: NodeId::DUMMY,
             kind: ExprKind::If {
                 cond: Box::new(cond),
                 then,
@@ -618,7 +650,8 @@ impl Parser {
             self.expect(&Tok::Eq, "'='")?;
             let expr = self.parse_expr_no_struct()?;
             let body = self.parse_block()?;
-            return Ok(Expr { id: NodeId::DUMMY,
+            return Ok(Expr {
+                id: NodeId::DUMMY,
                 kind: ExprKind::WhileLet {
                     pattern,
                     expr: Box::new(expr),
@@ -629,7 +662,8 @@ impl Parser {
         }
         let cond = self.parse_expr_no_struct()?;
         let body = self.parse_block()?;
-        Ok(Expr { id: NodeId::DUMMY,
+        Ok(Expr {
+            id: NodeId::DUMMY,
             kind: ExprKind::While {
                 cond: Box::new(cond),
                 body,
@@ -645,7 +679,8 @@ impl Parser {
         self.expect(&Tok::In, "'in'")?;
         let iter = self.parse_expr_no_struct()?;
         let body = self.parse_block()?;
-        Ok(Expr { id: NodeId::DUMMY,
+        Ok(Expr {
+            id: NodeId::DUMMY,
             kind: ExprKind::For {
                 pattern,
                 iter: Box::new(iter),
@@ -680,7 +715,8 @@ impl Parser {
             self.skip_terminators();
         }
         self.expect(&Tok::RBrace, "'}'")?;
-        Ok(Expr { id: NodeId::DUMMY,
+        Ok(Expr {
+            id: NodeId::DUMMY,
             kind: ExprKind::Match {
                 scrutinee: Box::new(scrutinee),
                 arms,
@@ -721,14 +757,16 @@ impl Parser {
         let body = if self.at(&Tok::LBrace) {
             let b = self.parse_block()?;
             let bpos = b.pos;
-            Expr { id: NodeId::DUMMY,
+            Expr {
+                id: NodeId::DUMMY,
                 kind: ExprKind::Block(b),
                 pos: bpos,
             }
         } else {
             self.parse_expr()?
         };
-        Ok(Expr { id: NodeId::DUMMY,
+        Ok(Expr {
+            id: NodeId::DUMMY,
             kind: ExprKind::Closure {
                 params,
                 body: Box::new(body),
@@ -771,7 +809,8 @@ impl Parser {
                 break;
             }
         }
-        Ok(Expr { id: NodeId::DUMMY,
+        Ok(Expr {
+            id: NodeId::DUMMY,
             kind: ExprKind::TryCatch {
                 body,
                 catches,
@@ -829,7 +868,7 @@ fn parse_fstring(raw: &str, pos: Pos) -> Result<Vec<FStrPart>> {
                 i += 1;
             }
             i += 1; // skip closing }
-                    // split optional format spec on the last `:` not inside brackets
+            // split optional format spec on the last `:` not inside brackets
             let (expr_src, spec) = split_format_spec(&inner);
             let expr = parse_expr_str(&expr_src, pos)?;
             parts.push(FStrPart::Expr {

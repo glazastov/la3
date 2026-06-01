@@ -33,7 +33,7 @@ impl TypeChecker {
             Ty::Int(I16 | U16) => (2, 2),
             Ty::Int(I32 | U32) => (4, 4),
             Ty::Int(I64 | U64 | Isize | Usize) => (8, 8),
-            Ty::IntLit => (4, 4),   // defaults to i32
+            Ty::IntLit => (4, 4), // defaults to i32
             Ty::Float(FloatKind::F32) => (4, 4),
             Ty::Float(FloatKind::F64) => (8, 8),
             Ty::FloatLit => (8, 8), // defaults to f64
@@ -160,9 +160,7 @@ impl TypeChecker {
                 .map(|v| {
                     let payload = match &v.kind {
                         VariantKind::Unit => vec![],
-                        VariantKind::Tuple(tys) => {
-                            tys.iter().map(|t| (None, resolve(t))).collect()
-                        }
+                        VariantKind::Tuple(tys) => tys.iter().map(|t| (None, resolve(t))).collect(),
                         VariantKind::Struct(fs) => fs
                             .iter()
                             .map(|(n, t)| (Some(n.clone()), resolve(t)))
@@ -216,7 +214,10 @@ impl TypeChecker {
         let tag_size = tag_bytes(members.len());
         let align = payload_align.max(tag_size);
         let payload_offset = align_up(tag_size, payload_align.max(1));
-        Some((align_up(payload_offset + payload_size, align.max(1)), align.max(1)))
+        Some((
+            align_up(payload_offset + payload_size, align.max(1)),
+            align.max(1),
+        ))
     }
 }
 

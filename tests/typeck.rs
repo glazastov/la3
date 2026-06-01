@@ -84,7 +84,9 @@ fn s2_let_annotation_must_match() {
 #[test]
 fn s2_nil_and_option_are_one_value() {
     // `nil` flows into an `Option<T>` binding, and `??` defaults a bare optional.
-    ok("fn pick(o: i64 | nil) -> i64 { o ?? 0 }\nfn main() { let x: Option<i64> = nil; io.println(pick(nil)) }");
+    ok(
+        "fn pick(o: i64 | nil) -> i64 { o ?? 0 }\nfn main() { let x: Option<i64> = nil; io.println(pick(nil)) }",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -271,23 +273,20 @@ fn function_return_type_is_checked() {
 /// `*i32 + integer literal` is accepted and the result type is `*i32`.
 #[test]
 fn s11_ptr_plus_int_literal_accepted() {
-    ok(
-        "fn main() {\
+    ok("fn main() {\
             let arr: [i32; 5] = [10, 20, 30, 40, 50]\n\
             let p: *i32 = &raw arr[0]\n\
             unsafe {\n\
                 let v = *(p + 2)\n\
                 io.println(v)\n\
             }\n\
-         }",
-    );
+         }");
 }
 
 /// `*i32 + i32 variable` (concrete, same kind) is accepted.
 #[test]
 fn s11_ptr_plus_i32_var_accepted() {
-    ok(
-        "fn main() {\
+    ok("fn main() {\
             let arr: [i32; 5] = [10, 20, 30, 40, 50]\n\
             let p: *i32 = &raw arr[0]\n\
             let i: i32 = 3\n\
@@ -295,15 +294,13 @@ fn s11_ptr_plus_i32_var_accepted() {
                 let v = *(p + i)\n\
                 io.println(v)\n\
             }\n\
-         }",
-    );
+         }");
 }
 
 /// `*i32 + inferred-i32 variable` (inferred from literal, no annotation) is accepted.
 #[test]
 fn s11_ptr_plus_inferred_int_var_accepted() {
-    ok(
-        "fn main() {\
+    ok("fn main() {\
             let arr: [i32; 5] = [10, 20, 30, 40, 50]\n\
             let p: *i32 = &raw arr[0]\n\
             let i = 3\n\
@@ -311,15 +308,13 @@ fn s11_ptr_plus_inferred_int_var_accepted() {
                 let v = *(p + i)\n\
                 io.println(v)\n\
             }\n\
-         }",
-    );
+         }");
 }
 
 /// `*mut u8 + integer literal` is accepted.
 #[test]
 fn s11_mut_ptr_u8_plus_literal_accepted() {
-    ok(
-        "fn main() {\
+    ok("fn main() {\
             let buf: *mut u8 = alloc(4)\n\
             unsafe {\n\
                 *(buf + 0) = 0xAA\n\
@@ -327,30 +322,26 @@ fn s11_mut_ptr_u8_plus_literal_accepted() {
                 io.println(*(buf + 1))\n\
             }\n\
             dealloc(buf, 4)\n\
-         }",
-    );
+         }");
 }
 
 /// `*T - integer` is accepted and produces `*T`.
 #[test]
 fn s11_ptr_minus_integer_accepted() {
-    ok(
-        "fn main() {\
+    ok("fn main() {\
             let arr: [i32; 5] = [10, 20, 30, 40, 50]\n\
             let p: *i32 = &raw arr[4]\n\
             unsafe {\n\
                 let v = *(p - 2)\n\
                 io.println(v)\n\
             }\n\
-         }",
-    );
+         }");
 }
 
 /// Reading through `*(ptr + n)` is accepted (dereference of offset pointer).
 #[test]
 fn s11_deref_ptr_offset_accepted() {
-    ok(
-        "fn main() {\
+    ok("fn main() {\
             let arr: [i32; 3] = [100, 200, 300]\n\
             let p: *i32 = &raw arr[0]\n\
             unsafe {\n\
@@ -361,16 +352,14 @@ fn s11_deref_ptr_offset_accepted() {
                 io.println(b)\n\
                 io.println(c)\n\
             }\n\
-         }",
-    );
+         }");
 }
 
 /// `*T + i64` (integer kind different from the pointed-to type) is accepted —
 /// the spec says the offset only needs to be *some* integer, not the same width.
 #[test]
 fn s11_ptr_plus_different_int_kind_accepted() {
-    ok(
-        "fn main() {\
+    ok("fn main() {\
             let arr: [i32; 5] = [10, 20, 30, 40, 50]\n\
             let p: *i32 = &raw arr[0]\n\
             let n: i64 = 2\n\
@@ -378,8 +367,7 @@ fn s11_ptr_plus_different_int_kind_accepted() {
                 let v = *(p + n as i32)\n\
                 io.println(v)\n\
             }\n\
-         }",
-    );
+         }");
 }
 
 /// A float offset is rejected with a specific pointer-arithmetic diagnostic.

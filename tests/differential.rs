@@ -53,7 +53,9 @@ fn try_build(src: &Path, bin: &Path) -> Result<bool, String> {
 
 /// Run a compiled binary and capture its observable behaviour.
 fn binary_run(bin: &Path) -> Run {
-    let out = Command::new(bin).output().expect("failed to launch compiled binary");
+    let out = Command::new(bin)
+        .output()
+        .expect("failed to launch compiled binary");
     Run {
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         code: out.status.code(),
@@ -96,12 +98,14 @@ fn compiled_matches_interpreter() {
 
         let compiled = binary_run(&bin);
         assert_eq!(
-            compiled.stdout, oracle.stdout,
+            compiled.stdout,
+            oracle.stdout,
             "stdout mismatch for {}: interpreter vs compiled",
             ex.display()
         );
         assert_eq!(
-            compiled.code, oracle.code,
+            compiled.code,
+            oracle.code,
             "exit-code mismatch for {}: interpreter vs compiled",
             ex.display()
         );

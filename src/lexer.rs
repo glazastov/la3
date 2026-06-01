@@ -180,7 +180,7 @@ impl Lexer {
                     return Ok(Token {
                         tok: Tok::Eof,
                         pos: start,
-                    })
+                    });
                 }
                 Some(c) => c,
             };

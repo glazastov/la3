@@ -66,7 +66,11 @@ fn trailing_small_field_pads_to_struct_align() {
     // i64 then u8: u8 at offset 8, struct rounds up to 16 (align 8).
     has(
         "struct Tail { a: i64, b: u8 } fn main() {}",
-        &["struct Tail  size=16 align=8", "@0    a: i64", "@8    b: u8"],
+        &[
+            "struct Tail  size=16 align=8",
+            "@0    a: i64",
+            "@8    b: u8",
+        ],
     );
 }
 
@@ -86,7 +90,10 @@ fn heap_field_is_pointer_sized() {
 fn fixed_array_field_layout() {
     has(
         "struct Buf { data: [u8; 4] } fn main() {}",
-        &["struct Buf  size=4 align=1", "@0    data: [u8; 4]  (size=4 align=1)"],
+        &[
+            "struct Buf  size=4 align=1",
+            "@0    data: [u8; 4]  (size=4 align=1)",
+        ],
     );
 }
 

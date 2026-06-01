@@ -445,7 +445,10 @@ fn number_item(item: &mut Item, n: &mut u32) {
             }
         }
         // No embedded expressions.
-        Item::Struct(_) | Item::Enum(_) | Item::Use(_) | Item::TypeAlias { .. }
+        Item::Struct(_)
+        | Item::Enum(_)
+        | Item::Use(_)
+        | Item::TypeAlias { .. }
         | Item::Interface(_) => {}
     }
 }
@@ -474,8 +477,14 @@ fn number_expr(e: &mut Expr, n: &mut u32) {
     *n += 1;
     match &mut e.kind {
         // Leaves.
-        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Char(_)
-        | ExprKind::Bool(_) | ExprKind::Nil | ExprKind::Ident(_) | ExprKind::SelfExpr
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Char(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Nil
+        | ExprKind::Ident(_)
+        | ExprKind::SelfExpr
         | ExprKind::Path(_) => {}
 
         ExprKind::FStr(parts) => {
@@ -573,7 +582,11 @@ fn number_expr(e: &mut Expr, n: &mut u32) {
         }
         ExprKind::Closure { body, .. } => number_expr(body, n),
         ExprKind::Try(e) | ExprKind::Await(e) => number_expr(e, n),
-        ExprKind::TryCatch { body, catches, finally } => {
+        ExprKind::TryCatch {
+            body,
+            catches,
+            finally,
+        } => {
             number_block(body, n);
             for c in catches {
                 number_block(&mut c.body, n);
