@@ -447,4 +447,57 @@ impl TypeChecker {
             );
         }
     }
+
+    /// Push a known expected type down onto still-flexible literal nodes so the
+    /// recorded table reflects the contextual width — the `42` in
+    /// `let x: u8 = 42` is recorded as `u8`, not the default `i32` (Section 2).
+    /// Only flexible literal nodes are rewritten; concrete nodes are left for
+    /// `expect` to police, so this never hides a genuine mismatch.
+    pub(super) fn pin_literals(&mut self, e: &Expr, expected: &Ty) {
+        let flexible = matches!(self.types.get(&e.id), Some(Ty::IntLit | Ty::FloatLit));
+        match &e.kind {
+            ExprKind::Int(_) if flexible && matches!(expected, Ty::Int(_)) => {
+                self.types.insert(e.id, expected.clone());
+            }
+            ExprKind::Float(_) if flexible && matches!(expected, Ty::Float(_)) => {
+                self.types.insert(e.id, expected.clone());
+            }
+            ExprKind::Unary {
+                op: UnOp::Neg,
+                expr,
+            } if flexible && expected.is_numeric() => {
+                self.types.insert(e.id, expected.clone());
+                self.pin_literals(expr, expected);
+            }
+            ExprKind::Binary { lhs, rhs, .. } if flexible && expected.is_numeric() => {
+                self.types.insert(e.id, expected.clone());
+                self.pin_literals(lhs, expected);
+                self.pin_literals(rhs, expected);
+            }
+            ExprKind::List(xs) => {
+                let el = elem_ty(expected);
+                if !el.is_unknown() {
+                    for x in xs {
+                        self.pin_literals(x, &el);
+                    }
+                }
+            }
+            ExprKind::ListRepeat { value, .. } => {
+                let el = elem_ty(expected);
+                if !el.is_unknown() {
+                    self.pin_literals(value, &el);
+                }
+            }
+            ExprKind::Tuple(xs) => {
+                if let Ty::Tuple(ts) = expected {
+                    if ts.len() == xs.len() {
+                        for (x, t) in xs.iter().zip(ts) {
+                            self.pin_literals(x, t);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }

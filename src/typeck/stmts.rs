@@ -32,6 +32,7 @@ impl TypeChecker {
                 let mut got = self.infer(value);
                 if let Some(d) = &declared {
                     self.expect(&got, d, *pos, "let binding");
+                    self.pin_literals(value, d);
                     got = d.clone();
                 }
                 self.bind_pattern(pattern, &got);
@@ -46,6 +47,9 @@ impl TypeChecker {
                     None => Ty::Unit,
                 };
                 self.expect(&got, &ret, *pos, "return value");
+                if let Some(e) = opt {
+                    self.pin_literals(e, &ret);
+                }
             }
             Stmt::Break(opt, _) => {
                 let got = match opt {

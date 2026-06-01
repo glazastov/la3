@@ -90,8 +90,15 @@ impl TypeTable {
 pub fn check_types(prog: &Program) -> TypeTable {
     let mut tc = TypeChecker::new(prog);
     tc.run(prog);
+    // Pin any literal left flexible by inference to its default (i32/f64), so the
+    // recorded table the back-end consumes is fully concrete (Section 2, rule 2).
+    let map = tc
+        .types
+        .into_iter()
+        .map(|(id, t)| (id, default_ty(&t)))
+        .collect();
     TypeTable {
-        map: tc.types,
+        map,
         order: tc.type_order,
         errors: tc.errors,
     }

@@ -63,6 +63,34 @@ pub(super) fn concrete_int(t: &Ty) -> Ty {
     }
 }
 
+/// Pin any still-flexible literal to its default concrete type (reference
+/// Section 2, rule 2: an unsuffixed integer literal defaults to `i32`, an
+/// unsuffixed float literal to `f64`). Applied to the finished type table so the
+/// back-end never sees an unresolved `{integer}`/`{float}`. Recurses through
+/// compound types so e.g. `List<{integer}>` becomes `List<i32>`.
+pub(super) fn default_ty(t: &Ty) -> Ty {
+    use Ty::*;
+    match t {
+        IntLit => Int(IntKind::I32),
+        FloatLit => Float(FloatKind::F64),
+        Array(e, n) => Array(Box::new(default_ty(e)), *n),
+        Slice(e) => Slice(Box::new(default_ty(e))),
+        List(e) => List(Box::new(default_ty(e))),
+        Set(e) => Set(Box::new(default_ty(e))),
+        Range(e) => Range(Box::new(default_ty(e))),
+        Map(k, v) => Map(Box::new(default_ty(k)), Box::new(default_ty(v))),
+        Tuple(xs) => Tuple(xs.iter().map(default_ty).collect()),
+        Struct(n, a) => Struct(n.clone(), a.iter().map(default_ty).collect()),
+        Enum(n, a) => Enum(n.clone(), a.iter().map(default_ty).collect()),
+        Union(ms) => Union(ms.iter().map(default_ty).collect()),
+        Ref(x) => Ref(Box::new(default_ty(x))),
+        Ptr(x) => Ptr(Box::new(default_ty(x))),
+        Future(x) => Future(Box::new(default_ty(x))),
+        Fn(ps, r) => Fn(ps.iter().map(default_ty).collect(), Box::new(default_ty(r))),
+        other => other.clone(),
+    }
+}
+
 pub(super) fn normalize_union(members: Vec<Ty>) -> Ty {
     let mut flat: Vec<Ty> = Vec::new();
     for m in members {

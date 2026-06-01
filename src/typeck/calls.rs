@@ -103,6 +103,9 @@ impl TypeChecker {
                 self.infer_closure(params, body, expected.as_ref());
             } else {
                 self.infer(a);
+                if let Some(p) = &expected {
+                    self.pin_literals(a, p);
+                }
             }
         }
     }
