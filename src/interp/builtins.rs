@@ -41,7 +41,19 @@ impl Interp {
                 if b == 0 {
                     return rt(pos, "floor division by zero");
                 }
-                Some(Value::Int(a.div_euclid(b)))
+                // Floor division rounds toward negative infinity (Lua `//`),
+                // which differs from `div_euclid` when the divisor is negative
+                // (e.g. `7 // -2` is `-4`, not `-3`). Adjust the truncating
+                // quotient down by one when the remainder is non-zero and the
+                // operands have opposite signs.
+                let q = a / b;
+                let r = a % b;
+                let floored = if r != 0 && ((r < 0) != (b < 0)) {
+                    q - 1
+                } else {
+                    q
+                };
+                Some(Value::Int(floored))
             }
             "min" => Some(self.fold_minmax(&argv, true, pos)?),
             "max" => Some(self.fold_minmax(&argv, false, pos)?),

@@ -46,8 +46,10 @@ impl TypeChecker {
                 Ty::Unit
             }
             ExprKind::Cast { expr, ty } => {
-                self.infer(expr);
-                self.resolve(ty)
+                let src = self.infer(expr);
+                let target = self.resolve(ty);
+                self.check_cast(&src, &target, e.pos);
+                target
             }
             ExprKind::Call { callee, args } => self.infer_call(callee, args, e.pos),
             ExprKind::MethodCall {
@@ -413,6 +415,36 @@ impl TypeChecker {
                     ),
                 );
             }
+        }
+    }
+
+    /// Validate an `as` cast (reference Section 3: `as` performs numeric
+    /// conversions). Legal conversions are numeric↔numeric and integer↔`char`;
+    /// everything else (e.g. `str as i32`, `bool as f64`) is an error. The check
+    /// stays lenient on `Unknown`/generic/pointer/reference operands so it never
+    /// invents a false positive for a type it does not fully model.
+    fn check_cast(&mut self, src: &Ty, target: &Ty, pos: Pos) {
+        let lenient =
+            |t: &Ty| t.is_unknown() || matches!(t, Ty::Param(_) | Ty::Ptr(_) | Ty::Ref(_));
+        if lenient(src) || lenient(target) {
+            return;
+        }
+        let ok = match (src, target) {
+            (s, t) if s.is_numeric() && t.is_numeric() => true,
+            (s, Ty::Char) if s.is_int() => true, // integer code point → char
+            (Ty::Char, t) if t.is_int() => true, // char → integer code point
+            (Ty::Char, Ty::Char) => true,
+            _ => false,
+        };
+        if !ok {
+            self.err(
+                pos,
+                format!(
+                    "cannot cast `{}` to `{}`; `as` converts between numeric types (and integer↔`char`)",
+                    display_ty(src),
+                    display_ty(target)
+                ),
+            );
         }
     }
 }
