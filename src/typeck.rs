@@ -64,7 +64,7 @@ impl TypeTable {
         self.map.get(&id).map_or(true, ty_is_copy)
     }
 
-    /// Number of typed expression nodes. Used by the back-end (Phase 4+).
+    /// Number of typed expression nodes. Used by the back-end (HIR/MIR onward).
     #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.map.len()

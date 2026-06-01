@@ -60,7 +60,7 @@ cargo run -- run examples/shapes.la3
 
 ## Native compiler (in progress)
 
-A real LLVM back-end is being built on top of the front-end; see [COMPILER_PLAN.md](COMPILER_PLAN.md) for the phased roadmap and status. The pipeline target is `AST → sound type check → HIR → MIR → LLVM IR → object → link runtime`, with memory managed by Rust-style **ownership and a borrow checker** (move semantics + deterministic drop; this supersedes the earlier ARC plan). The workspace now includes a [`runtime/`](runtime/) crate (the native runtime compiled programs will link against). As of Phase 1, the type checker annotates every expression node with a concrete type (`la3 types`) and computes the by-value memory layout of structs and enums (`la3 layout`) — both consumed by the back-end.
+A real LLVM back-end is being built on top of the front-end; see [COMPILER_PLAN.md](COMPILER_PLAN.md) for the phased roadmap and status. The pipeline target is `AST → sound type + borrow check → HIR → MIR → LLVM IR → object → link runtime`, with memory managed by Rust-style **ownership and a borrow checker** (move semantics + deterministic drop; this supersedes the earlier ARC plan). **MIR** is an explicit phase that owns the hard lowerings (monomorphization, match decision trees, closure conversion, drop insertion), keeping the LLVM back-end a thin translation. The workspace now includes a [`runtime/`](runtime/) crate (the native runtime compiled programs will link against). As of Phase 1, the type checker annotates every expression node with a concrete type (`la3 types`) and computes the by-value memory layout of structs and enums (`la3 layout`) — both consumed by the back-end.
 
 ## Deliberate deviations from the spec
 

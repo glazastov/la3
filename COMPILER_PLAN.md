@@ -24,15 +24,15 @@ lexer.rs → parser.rs → ast.rs → checker.rs (names) → typeck.rs (types, l
 
 ## Design decisions (v1)
 
-| Topic          | v1 decision                                                         | Why                                          |
-| -------------- | ------------------------------------------------------------------- | -------------------------------------------- |
-| Backend        | LLVM via `inkwell` (LLVM 18)                                        | Industry standard; LLVM 18 already installed |
-| Memory         | **Ownership** (move semantics + full borrow checker, deterministic drop) | User decision 2026-06-01; matches reference Section 11. _Supersedes the earlier ARC v1 plan._ |
-| Generics       | Monomorphization                                                    | Required for static layout                   |
-| IR             | AST → HIR (typed, desugared) → MIR (mono, layout, RC, match) → LLVM | The layer that makes the rest viable         |
-| Test oracle    | The interpreter stays alive for _differential testing_              | Cheap confidence per phase                   |
-| Initial target | `x86_64-unknown-linux-gnu` native                                   | Reduces scope                                |
-| Toolchain      | rustup `stable` (≥1.94), edition 2024                               | pinned by `rust-toolchain.toml`              |
+| Topic          | v1 decision                                                                                          | Why                                                                                           |
+| -------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| Backend        | LLVM via `inkwell` (LLVM 18)                                                                         | Industry standard; LLVM 18 already installed                                                  |
+| Memory         | **Ownership** (move semantics + full borrow checker, deterministic drop)                             | User decision 2026-06-01; matches reference Section 11. _Supersedes the earlier ARC v1 plan._ |
+| Generics       | Monomorphization                                                                                     | Required for static layout                                                                    |
+| IR             | AST → HIR (typed, desugared) → MIR (mono, layout, drop insertion, match trees, closure conv.) → LLVM | MIR is its own phase (3) — see the back-end layering note                                     |
+| Test oracle    | The interpreter stays alive for _differential testing_                                               | Cheap confidence per phase                                                                    |
+| Initial target | `x86_64-unknown-linux-gnu` native                                                                    | Reduces scope                                                                                 |
+| Toolchain      | rustup `stable` (≥1.94), edition 2024                                                                | pinned by `rust-toolchain.toml`                                                               |
 
 ### v1 subset (explicit cuts for the first binary)
 
@@ -77,9 +77,10 @@ back-end relies on for deterministic drop. Seeds already present: `check_borrow_
 (aliasing-xor-mutability on call args), `borrow_root`, `unsafe_depth`.
 
 **Design decisions (recorded 2026-06-01):**
+
 - _Copy vs move_ (`TypeTable::is_copy`): scalars (`bool`/ints/floats/`char`/`()`), `nil`,
   references `&T`, raw pointers `*T`, slices `&[T]`, ranges, and `fn` are **Copy**;
-  `str`, `List`/`Map`/`Set`, tuples/arrays *of non-Copy*, structs, enums, futures, and
+  `str`, `List`/`Map`/`Set`, tuples/arrays _of non-Copy_, structs, enums, futures, and
   unions are **move**. `Unknown`/generic `Param` are treated as Copy (lenient — never
   invent a move on a type we don't fully model).
 - _What moves a value_: only **unambiguous** moves where the caller syntax alone decides
@@ -97,62 +98,96 @@ back-end relies on for deterministic drop. Seeds already present: `check_borrow_
 - [ ] 1.6.3 Lifetimes: a reference may not outlive its referent (reject returning/storing a borrow of a local)
 - [ ] 1.6.4 Drop & ownership-aware codegen contract (deterministic destruction order; what MIR must carry)
 
+> **Back-end layering (why MIR is its own phase).** The pipeline is
+> `AST → [type + borrow check] → HIR → MIR → LLVM IR → object → link runtime`.
+> HIR is the typed, desugared tree; **MIR** is a control-flow graph of basic
+> blocks with explicit temporaries where the _hard_ lowerings live —
+> monomorphization, match decision trees, closure conversion, and ownership
+> lowering (drop insertion + borrow→pointer). Keeping MIR explicit stops that
+> logic from leaking into the LLVM back-end, which should be a thin, mostly
+> mechanical MIR→IR translation. Note the split: Phase 1.6 _checks_ ownership
+> (rejects bad programs on the AST); MIR 3.5 _lowers_ it (inserts the drops the
+> check proved correct).
+
 ## Phase 2 — HIR + desugaring · STATUS: [ ]
+
+Typed tree, all sugar removed, but still tree-shaped (no CFG yet).
 
 - [ ] 2.1 Define `hir.rs` (typed AST, no sugar)
 - [ ] 2.2 Lowering: f-strings → format calls; `?.`/`??` → nil match
 - [ ] 2.3 Lowering: `if let`/`while let`/`for..in` → match/iterator; compound `+=` etc.
 - [ ] 2.4 Explicit closures and captures in HIR
 
-## Phase 3 — Runtime library · STATUS: [ ]
+## Phase 3 — MIR (the layer that makes the rest viable) · STATUS: [ ]
 
-- [ ] 3.1 `str` layout & ABI (UTF-8), RC (`rc_inc`/`rc_dec`/drop)
-- [ ] 3.2 `List<T>`, `Map`, `Set` in the runtime
-- [ ] 3.3 f-string formatting with specs (`:02x`, `:.1f`, `:>20`)
-- [ ] 3.4 `extern "C"` stdlib: `io`, `fs`, `os`, `math`, `bytes`, `json` (subset)
+A CFG of basic blocks with explicit temporaries and typed locals. **Every hard
+transformation happens here**, so Phase 5 (LLVM) stays a thin translation.
 
-## Phase 4 — Core codegen · STATUS: [ ] ← first binary that runs
+- [ ] 3.1 Define `mir.rs`: basic blocks + terminators, explicit temporaries, typed locals, explicit drop points
+- [ ] 3.2 **Monomorphization** — collect concrete generic instances, emit a specialized copy per instantiation (required for static layout)
+- [ ] 3.3 **Match → decision trees** (guards, ranges, `@`, or-patterns, exhaustive default)
+- [ ] 3.4 **Closure conversion** — closures → `{fn ptr, captured env}`; `move` vs by-ref capture made explicit
+- [ ] 3.5 **Ownership lowering** — consume the Phase 1.6 borrow-check facts: insert deterministic `drop`s at end-of-scope/last-use, lower `&T`/`&mut T` to pointers, thread moves
+- [ ] 3.6 Lower HIR control flow (`if`/`loop`/`while`/`break`-with-value) into the CFG
 
-- [ ] 4.1 Add `inkwell`; emit empty LLVM module + link runtime
-- [ ] 4.2 Functions, params, return, scalars, arithmetic (exact semantics)
-- [ ] 4.3 Control flow: `if`/`loop`/`while`/`break with value`/`return`
-- [ ] 4.4 Structs by value; enums as tagged unions
-- [ ] 4.5 Compile `match` → decision tree (guards, ranges, `@`, or-patterns)
-- [ ] 4.6 **Milestone**: `fizzbuzz.la3`, `fib.la3`, `shapes.la3` compile and match the interpreter
+## Phase 4 — Runtime library · STATUS: [ ]
 
-## Phase 5 — Memory: heap, refs, pointers · STATUS: [ ]
+The native runtime compiled code links against (ownership model: owned values +
+`drop`, **not** ARC).
 
-- [ ] 5.1 `List`/`Map`/`Set`/`str` via runtime + RC insertion in MIR
-- [ ] 5.2 `&T`/`&mut T` (safe refs); `*r`/`*r = v`
-- [ ] 5.3 `*T`/`*mut T`, `&raw`, `sizeof(T)`-scaled arithmetic, `unsafe`, `alloc`/`dealloc`
-- [ ] 5.4 **Milestone**: `collections`, `memory`, `tls_record`, `word_count`
+- [ ] 4.1 `str` layout & ABI (UTF-8) + `drop` glue
+- [ ] 4.2 `List<T>`, `Map`, `Set` in the runtime (owned; `drop` frees)
+- [ ] 4.3 f-string formatting with specs (`:02x`, `:.1f`, `:>20`)
+- [ ] 4.4 `extern "C"` stdlib: `io`, `fs`, `os`, `math`, `bytes`, `json` (subset)
 
-## Phase 6 — Generics & interfaces · STATUS: [ ]
+## Phase 5 — LLVM codegen (MIR → IR) · STATUS: [ ] ← first binary that runs
 
-- [ ] 6.1 Monomorphization (collect concrete instances, emit copies)
-- [ ] 6.2 Interfaces: static dispatch via bounds
-- [ ] 6.3 Dynamic dispatch via vtables when needed
+Thin, mechanical translation of MIR to LLVM IR — no language logic here.
 
-## Phase 7 — Closures · STATUS: [ ]
+- [ ] 5.1 Add `inkwell`; emit empty LLVM module + link runtime
+- [ ] 5.2 Functions, params, return, scalars, arithmetic (exact semantics)
+- [ ] 5.3 Control flow from the MIR CFG; `break with value`/`return`
+- [ ] 5.4 Structs by value; enums as tagged unions; the lowered match trees
+- [ ] 5.5 **Milestone**: `fizzbuzz.la3`, `fib.la3`, `shapes.la3` compile and match the interpreter
 
-- [ ] 7.1 Closures = {fn ptr, heap env}; `move` vs by-ref capture
-- [ ] 7.2 Higher-order methods (`map`/`filter`/`reduce`/`sort_by`/`group_by`)
+## Phase 6 — References, raw pointers, unsafe · STATUS: [ ]
 
-## Phase 8 — Errors · STATUS: [ ]
+Codegen for the memory features (the _checking_ is Phase 1.6; the _lowering_ is MIR 3.5).
 
-- [ ] 8.1 `Result`/`Option`/`?` (early return over enums)
-- [ ] 8.2 `try`/`catch`/`finally` with unwinding (landing pads + personality) — may defer
+- [ ] 6.1 `List`/`Map`/`Set`/`str` codegen against the runtime
+- [ ] 6.2 `&T`/`&mut T` (safe refs); `*r`/`*r = v`
+- [ ] 6.3 `*T`/`*mut T`, `&raw`, `sizeof(T)`-scaled arithmetic, `unsafe`, `alloc`/`dealloc`
+- [ ] 6.4 **Milestone**: `collections`, `memory`, `tls_record`, `word_count`
 
-## Phase 9 — Concurrency (most expensive; last) · STATUS: [ ]
+## Phase 7 — Generics & interfaces · STATUS: [ ]
 
-- [ ] 9.1 `spawn`/`join`/channels over OS threads
-- [ ] 9.2 `async`/`await`/`all`/`race` via state machines + executor
+(Monomorphization itself is MIR 3.2; this is dispatch.)
 
-## Phase 10 — Driver & quality · STATUS: [ ]
+- [ ] 7.1 Interfaces: static dispatch via bounds
+- [ ] 7.2 Dynamic dispatch via vtables when needed
 
-- [ ] 10.1 Pipeline: object → link runtime → executable; `-O` flags, target
-- [ ] 10.2 Conformance: interp×compiled differential over all `examples/` + `tests/`
-- [ ] 10.3 Golden IR tests; (future) DWARF debug info
+## Phase 8 — Closures & higher-order methods · STATUS: [ ]
+
+(Closure _conversion_ is MIR 3.4; this is the codegen + library on top.)
+
+- [ ] 8.1 Codegen for converted closures = `{fn ptr, heap env}`
+- [ ] 8.2 Higher-order methods (`map`/`filter`/`reduce`/`sort_by`/`group_by`)
+
+## Phase 9 — Errors · STATUS: [ ]
+
+- [ ] 9.1 `Result`/`Option`/`?` (early return over enums)
+- [ ] 9.2 `try`/`catch`/`finally` with unwinding (landing pads + personality) — may defer
+
+## Phase 10 — Concurrency (most expensive; last) · STATUS: [ ]
+
+- [ ] 10.1 `spawn`/`join`/channels over OS threads
+- [ ] 10.2 `async`/`await`/`all`/`race` via state machines + executor
+
+## Phase 11 — Driver & quality · STATUS: [ ]
+
+- [ ] 11.1 Pipeline: object → link runtime → executable; `-O` flags, target
+- [ ] 11.2 Conformance: interp×compiled differential over all `examples/` + `tests/`
+- [ ] 11.3 Golden IR tests; (future) DWARF debug info
 
 ---
 
@@ -165,5 +200,6 @@ back-end relies on for deterministic drop. Seeds already present: `check_borrow_
 - 2026-05-31 — **Phase 1.3 done.** By-value layout (`size_align`, `aggregate_sa`, `enum_layout_info`): C-style aggregates, tagged-union enums (incl. built-in `Option`/`Result`), fixed arrays, heap handles pointer-sized, slices as fat pointers. Fixed a real gap — the parser discarded enum-variant payload types, so `VariantKind` now stores `TypeExpr`s. New `la3 layout` command + 9-test battery (`tests/layout.rs`). 69 tests pass.
 - 2026-06-01 — **Refactor (modularization).** Split the two remaining monoliths into focused submodules, mirroring the earlier `parser/`+`typeck/` split: `interp.rs` 2984→854 lines over `src/interp/{stmts,exprs,matching,loops,concurrency,calls,convert,builtins}.rs`; `typeck.rs` 1862→351 lines over `src/typeck/{collect,driver,stmts,infer,calls,control}.rs` (alongside the existing `builtins`/`layout`/`relations`). Pure reorganization (`use super::*;`, methods `pub(super)`), no behavior change. 69 tests still pass.
 - 2026-06-01 — **Phase 1.4 done.** `as` cast legality enforced statically (`TypeChecker::check_cast`): numeric↔numeric and integer↔`char` only; `str as i32`/`bool as f64` are now type errors (lenient on `Unknown`/generic/pointer/ref). Confirmed runtime exactness for `/` (trunc toward zero), `%` (left sign), `**`→`f64`, and `as` truncation/sign; **fixed `idiv`** floor division, which used `div_euclid` and rounded wrong for a negative divisor (`idiv(7,-2)`: −3 → −4). New battery `tests/casts.rs` (10 tests). 79 tests pass.
+- 2026-06-01 — **Roadmap restructure (explicit MIR).** The pipeline declared `AST → HIR → MIR → LLVM` but the phases jumped HIR (2) → LLVM (4), with no MIR phase — the hard lowerings (monomorphization, drop insertion, borrow lowering, match decision trees, closure conversion) had no home and risked leaking into the back-end. Inserted **Phase 3 — MIR** and renumbered: Runtime 3→4, LLVM codegen 4→5, refs/pointers 5→6, generics 6→7, closures 7→8, errors 8→9, concurrency 9→10, driver 10→11. Relocated mono (was 6.1)→3.2, match trees (was 4.5)→3.3, closure conversion (was 7.1)→3.4, and added ownership lowering 3.5. Clarified the split: 1.6 _checks_ ownership, MIR 3.5 _lowers_ it. Updated CLAUDE.md/README cross-refs (LLVM is now Phase 5) and the IR/Memory rows (RC→drop). No code behavior change.
 - 2026-06-01 — **Phase 1.6.1 done.** New `borrowck` pass ([src/borrowck.rs](src/borrowck.rs)), run from `checker::check` after a clean type check (so `la3 check`/`run`/`build` all enforce it). Move semantics: `TypeTable::is_copy` classifies Copy vs move types; `let y = x` / `x = y` of a non-Copy binding moves it, and a later read is **use-after-move**. Flow-sensitive: `if`/`match` branch union + two-pass loop check; `let`/`=` re-init clears the mark. Argument/receiver moves and `move`-closure captures are deferred to 1.6.2 (proven necessary: `xs.map(..)` borrows its receiver and `m.get(k)` borrows its arg, so the examples reuse both). Zero false positives across all examples. New battery `tests/ownership.rs` (10 tests). 98 tests pass. Awaiting review before 1.6.2.
 - 2026-06-01 — **Phase 1 complete.** **1.5 done:** literal defaulting (`relations::default_ty` over the finished table) + contextual pinning (`TypeChecker::pin_literals` at `let`-with-annotation, `return`, and call args) — `la3 types` is now fully concrete, no `{integer}`/`{float}` left; no-implicit-widening confirmed with real errors. New battery `tests/inference.rs` (9 tests). 88 tests pass. **Decision:** user chose full **Ownership** (move + borrow checker, deterministic drop) over the earlier ARC plan — decision table + cuts updated, new **Phase 1.6** added. Awaiting review before Phase 1.6.

@@ -122,7 +122,7 @@ fn main() {
         }
         "build" => {
             // Front-end is shared with the interpreter: parse, then run the
-            // checker. Codegen itself lands in Phase 4 (see COMPILER_PLAN.md);
+            // checker. Codegen itself lands in Phase 5 (see COMPILER_PLAN.md);
             // for now `build` proves the front-end accepts the program and
             // reports that the LLVM backend is not wired yet.
             let prog = match parser::parse(&src) {
@@ -138,7 +138,7 @@ fn main() {
             }
             eprintln!(
                 "la3: front-end OK for {}; native codegen is not implemented yet \
-                 (LLVM backend lands in Phase 4 — see COMPILER_PLAN.md)",
+                 (LLVM backend lands in Phase 5 — see COMPILER_PLAN.md)",
                 path
             );
             exit(3);

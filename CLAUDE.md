@@ -37,22 +37,27 @@ cargo run -- build examples/fib.la3    # (WIP) compile to a native binary
 compiler emits binaries, **differentially test** the compiled output against the
 interpreter (same stdout/exit code).
 
-## LLVM (from Phase 4 on)
+## LLVM (from Phase 5 on)
 
 - LLVM 18 is installed at `/usr/lib/llvm-18` (not on `PATH`).
 - `inkwell` needs: feature `llvm18-0` and env `LLVM_SYS_181_PREFIX=/usr/lib/llvm-18`.
 - `inkwell` is intentionally **not** a dependency yet (keeps the build green); it
-  is added in Phase 4.1.
+  is added in Phase 5.1.
 
 ## Architecture (target)
 
 ```
-AST → [sound type check] → HIR (typed, desugared)
-    → [monomorphization] → MIR (layout, RC, match lowering) → LLVM IR → object → link runtime
+AST → [sound type check + borrow check] → HIR (typed, desugared)
+    → MIR (monomorphization, match trees, closure conversion, ownership lowering: drop insertion + borrow→pointer)
+    → LLVM IR → object → link runtime
 ```
 
 - Keep the **interpreter** working — it is our correctness oracle.
-- Heap memory uses **ARC** in v1 (no full borrow checker yet).
+- Memory is **ownership** (move semantics + borrow checker, deterministic drop), per
+  reference Section 11 — this replaced the earlier ARC plan (user decision 2026-06-01).
+  Ownership is _checked_ in Phase 1.6 and _lowered_ (drops inserted) in MIR.
+- **MIR is an explicit phase** (Phase 3) where the hard lowerings live, so the LLVM
+  back-end stays a thin MIR→IR translation.
 - The **`runtime/`** crate is the native runtime the compiled code links against.
 
 ## Don't guess — read the docs
@@ -72,14 +77,14 @@ non-obvious decision in `COMPILER_PLAN.md`.
 
 ## Source map
 
-| File                             | Role                                               |
-| -------------------------------- | -------------------------------------------------- |
-| [src/lexer.rs](src/lexer.rs)     | Tokenizer                                          |
-| [src/parser.rs](src/parser.rs)   | Recursive-descent parser → AST                     |
-| [src/ast.rs](src/ast.rs)         | AST node definitions                               |
-| [src/checker.rs](src/checker.rs) | Name-resolution pass                               |
-| [src/typeck.rs](src/typeck.rs)   | Type checker; semantic `Ty` (submodules in `typeck/`) |
-| [src/borrowck.rs](src/borrowck.rs) | Ownership / borrow checker (Phase 1.6)           |
-| [src/interp.rs](src/interp.rs)   | Tree-walking interpreter (submodules in `interp/`) |
-| [src/diag.rs](src/diag.rs)       | Diagnostics with source spans                      |
-| [src/main.rs](src/main.rs)       | CLI: `run`/`check`/`ast`/`tokens` (+ `build`, WIP) |
+| File                               | Role                                                  |
+| ---------------------------------- | ----------------------------------------------------- |
+| [src/lexer.rs](src/lexer.rs)       | Tokenizer                                             |
+| [src/parser.rs](src/parser.rs)     | Recursive-descent parser → AST                        |
+| [src/ast.rs](src/ast.rs)           | AST node definitions                                  |
+| [src/checker.rs](src/checker.rs)   | Name-resolution pass                                  |
+| [src/typeck.rs](src/typeck.rs)     | Type checker; semantic `Ty` (submodules in `typeck/`) |
+| [src/borrowck.rs](src/borrowck.rs) | Ownership / borrow checker (Phase 1.6)                |
+| [src/interp.rs](src/interp.rs)     | Tree-walking interpreter (submodules in `interp/`)    |
+| [src/diag.rs](src/diag.rs)         | Diagnostics with source spans                         |
+| [src/main.rs](src/main.rs)         | CLI: `run`/`check`/`ast`/`tokens` (+ `build`, WIP)    |
