@@ -24,7 +24,7 @@ use std::process::exit;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        eprintln!("usage: la3 <run|check|build|ast|tokens|types|layout> <file.la3>");
+        eprintln!("usage: la3 <run|check|build|ast|tokens|types|layout|resolve> <file.la3>");
         exit(2);
     }
     let cmd = args[1].as_str();
@@ -61,6 +61,23 @@ fn main() {
                     eprintln!("{}\n", d.render(path, &src));
                 }
                 eprintln!("{} type error(s)", table.errors.len());
+                exit(1);
+            }
+        }
+        "resolve" => {
+            // Debug view: name resolution output — every value binding and which
+            // binding each local use resolves to (shadowing made explicit).
+            let prog = match parser::parse(&src) {
+                Ok(p) => p,
+                Err(d) => fail(&d, path, &src),
+            };
+            let res = checker::resolve(&prog);
+            print!("{}", res.dump());
+            if !res.errors.is_empty() {
+                for d in &res.errors {
+                    eprintln!("{}\n", d.render(path, &src));
+                }
+                eprintln!("{} error(s)", res.errors.len());
                 exit(1);
             }
         }

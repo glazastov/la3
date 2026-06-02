@@ -28,6 +28,13 @@ impl NodeId {
     pub const DUMMY: NodeId = NodeId(u32::MAX);
 }
 
+/// A unique id for a *value binding site* (a `let`, parameter, pattern binding,
+/// closure parameter, …), assigned by name resolution ([`crate::checker`]).
+/// Every use of a local resolves to exactly one `BindingId`, so downstream
+/// passes (HIR/MIR) work on ids and never have to reason about shadowing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct BindingId(pub u32);
+
 #[derive(Clone, Debug)]
 pub struct Program {
     pub items: Vec<Item>,

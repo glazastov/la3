@@ -2,7 +2,11 @@
 //!
 //! 1. **Name resolution** (this module): reports references to names that are
 //!    not defined anywhere in scope (locals, parameters, functions, consts,
-//!    types, enum variants, the standard modules, or the builtins).
+//!    types, enum variants, the standard modules, or the builtins), and assigns
+//!    a unique [`BindingId`] to every *value binding site* (a `let`, parameter,
+//!    pattern binding, closure param, …), mapping each *use* of a local to its
+//!    binding. Shadowing is resolved here, once — downstream passes (HIR/MIR)
+//!    work on ids and never reason about names again.
 //! 2. **Type checking** ([`crate::typeck`]): enforces the typing rules from
 //!    reference Sections 2, 4, 7, and 9.
 //!
@@ -10,15 +14,77 @@
 //! name exists; type diagnostics are appended and the combined list is sorted by
 //! source position.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
-use crate::diag::{Diagnostic, Phase};
+use crate::diag::{Diagnostic, Phase, Pos};
 
-pub fn check(prog: &Program) -> Vec<Diagnostic> {
+/// The product of name resolution: the binding each local *use* refers to, the
+/// name of every binding (indexed by [`BindingId`]), and any diagnostics.
+pub struct Resolutions {
+    /// Use-site (`Ident`/`self`) `NodeId` → the local binding it refers to.
+    /// Absent ⇒ the use named a global item or builtin (resolved by name).
+    uses: HashMap<NodeId, BindingId>,
+    /// Binding name, indexed by `BindingId.0`.
+    bindings: Vec<String>,
+    /// `(position, binding)` per use, in resolution order, for the `la3 resolve`
+    /// dump.
+    use_sites: Vec<(Pos, BindingId)>,
+    pub errors: Vec<Diagnostic>,
+}
+
+impl Resolutions {
+    /// The local binding a use-site node refers to, or `None` if it named a
+    /// global/builtin.
+    #[allow(dead_code)]
+    pub fn binding_of(&self, use_site: NodeId) -> Option<BindingId> {
+        self.uses.get(&use_site).copied()
+    }
+
+    /// The source name of a binding.
+    #[allow(dead_code)]
+    pub fn name(&self, b: BindingId) -> &str {
+        &self.bindings[b.0 as usize]
+    }
+
+    /// Debug view for the `la3 resolve` command: every binding, then every use
+    /// resolved to its binding (sorted by position).
+    pub fn dump(&self) -> String {
+        let mut out = String::from("bindings:\n");
+        for (i, name) in self.bindings.iter().enumerate() {
+            out.push_str(&format!("  #{:<3} {}\n", i, name));
+        }
+        out.push_str("uses:\n");
+        let mut sites = self.use_sites.clone();
+        sites.sort_by_key(|(p, _)| (p.line, p.col));
+        for (pos, b) in sites {
+            out.push_str(&format!(
+                "  {:>4}:{:<3} {} -> #{}\n",
+                pos.line,
+                pos.col,
+                self.bindings[b.0 as usize],
+                b.0
+            ));
+        }
+        out
+    }
+}
+
+/// Run name resolution over a program.
+pub fn resolve(prog: &Program) -> Resolutions {
     let mut r = Resolver::new(prog);
     r.run(prog);
-    let mut errors = r.errors;
+    Resolutions {
+        uses: r.uses,
+        bindings: r.bindings,
+        use_sites: r.use_sites,
+        errors: r.errors,
+    }
+}
+
+pub fn check(prog: &Program) -> Vec<Diagnostic> {
+    let res = resolve(prog);
+    let mut errors = res.errors;
     // Only run the type pass when names all resolve, so undefined-name noise
     // does not produce confusing downstream type errors.
     if errors.is_empty() {
@@ -36,8 +102,14 @@ pub fn check(prog: &Program) -> Vec<Diagnostic> {
 }
 
 struct Resolver {
+    /// Global items + builtins, resolved by name (no `BindingId`).
     globals: HashSet<String>,
-    scopes: Vec<HashSet<String>>,
+    /// Lexical scopes of *local* value bindings, innermost last.
+    scopes: Vec<HashMap<String, BindingId>>,
+    next: u32,
+    uses: HashMap<NodeId, BindingId>,
+    bindings: Vec<String>,
+    use_sites: Vec<(Pos, BindingId)>,
     errors: Vec<Diagnostic>,
 }
 
@@ -90,6 +162,10 @@ impl Resolver {
         Resolver {
             globals,
             scopes: Vec::new(),
+            next: 0,
+            uses: HashMap::new(),
+            bindings: Vec::new(),
+            use_sites: Vec::new(),
             errors: Vec::new(),
         }
     }
@@ -110,20 +186,46 @@ impl Resolver {
     }
 
     fn push(&mut self) {
-        self.scopes.push(HashSet::new());
+        self.scopes.push(HashMap::new());
     }
     fn pop(&mut self) {
         self.scopes.pop();
     }
-    fn declare(&mut self, name: &str) {
+
+    /// Introduce a fresh local binding in the innermost scope and return its id.
+    /// A later `let` of the same name shadows the earlier one (its own id).
+    fn declare(&mut self, name: &str) -> BindingId {
+        let id = BindingId(self.next);
+        self.next += 1;
+        self.bindings.push(name.to_string());
         if let Some(s) = self.scopes.last_mut() {
-            s.insert(name.to_string());
-        } else {
-            self.globals.insert(name.to_string());
+            s.insert(name.to_string(), id);
         }
+        id
     }
-    fn known(&self, name: &str) -> bool {
-        name == "_" || self.globals.contains(name) || self.scopes.iter().any(|s| s.contains(name))
+
+    /// The binding a local name resolves to, searching innermost scope outward.
+    fn lookup(&self, name: &str) -> Option<BindingId> {
+        self.scopes.iter().rev().find_map(|s| s.get(name).copied())
+    }
+
+    /// Record (and validate) a use of `name` at `pos`/`node`. A local use is
+    /// recorded against its binding; a global/builtin is accepted by name; an
+    /// unknown name is an error.
+    fn use_name(&mut self, name: &str, pos: Pos, node: NodeId) {
+        if name == "_" {
+            return;
+        }
+        if let Some(id) = self.lookup(name) {
+            self.uses.insert(node, id);
+            self.use_sites.push((pos, id));
+        } else if !self.globals.contains(name) {
+            self.errors.push(Diagnostic::new(
+                Phase::Check,
+                pos,
+                format!("undefined name '{}'", name),
+            ));
+        }
     }
 
     fn fn_decl(&mut self, f: &FnDecl) {
@@ -177,7 +279,9 @@ impl Resolver {
 
     fn bind_pattern(&mut self, p: &Pattern) {
         match p {
-            Pattern::Binding(n) => self.declare(n),
+            Pattern::Binding(n) => {
+                self.declare(n);
+            }
             Pattern::At(n, sub) => {
                 self.declare(n);
                 self.bind_pattern(sub);
@@ -192,30 +296,26 @@ impl Resolver {
                 }
             }
             Pattern::Variant { args, .. } => args.iter().for_each(|p| self.bind_pattern(p)),
-            Pattern::Struct { fields, .. } => fields.iter().for_each(|f| self.declare(f)),
-            Pattern::Typed { binding, .. } => self.declare(binding),
+            Pattern::Struct { fields, .. } => fields.iter().for_each(|f| {
+                self.declare(f);
+            }),
+            Pattern::Typed { binding, .. } => {
+                self.declare(binding);
+            }
             _ => {}
         }
     }
 
     fn expr(&mut self, e: &Expr) {
         match &e.kind {
-            ExprKind::Ident(name) => {
-                if !self.known(name) {
-                    self.errors.push(Diagnostic::new(
-                        Phase::Check,
-                        e.pos,
-                        format!("undefined name '{}'", name),
-                    ));
-                }
-            }
+            ExprKind::Ident(name) => self.use_name(name, e.pos, e.id),
+            ExprKind::SelfExpr => self.use_name("self", e.pos, e.id),
             ExprKind::Int(_)
             | ExprKind::Float(_)
             | ExprKind::Str(_)
             | ExprKind::Char(_)
             | ExprKind::Bool(_)
             | ExprKind::Nil
-            | ExprKind::SelfExpr
             | ExprKind::Path(_) => {}
             ExprKind::FStr(parts) => {
                 for p in parts {
