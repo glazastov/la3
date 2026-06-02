@@ -68,7 +68,7 @@ Prerequisite for everything. The light `typeck` becomes the source of truth.
 - [x] 1.4 Exact `as` semantics — type checker now validates cast legality (`TypeChecker::check_cast`): `as` converts numeric↔numeric and integer↔`char` only, rejecting e.g. `str as i32`/`bool as f64` (lenient on `Unknown`/generic/pointer/ref). Runtime exactness confirmed/fixed: `/` truncates toward zero, `%` takes the left sign, `**`→`f64`, `as` truncates+sign via `mask_int`/`mask_uint` and float→int `trunc()`; **fixed `idiv`** (floor `//`) which used `div_euclid` and was wrong for a negative divisor (`idiv(7,-2)` now `-4`). Battery: `tests/casts.rs`
 - [x] 1.5 Sound inference — unconstrained literals now default to `i32`/`f64` (`relations::default_ty`, applied to the finished `TypeTable` in `check_types`); contextual **pinning** (`TypeChecker::pin_literals`) records annotated literals at their target width (`let x: u8 = 42`, array elements, call arguments) instead of the default. No implicit widening/narrowing (already enforced by `assignable`) confirmed with real type errors. Battery: `tests/inference.rs`
 
-## Phase 1.6 — Ownership & borrow checker · STATUS: [~] in progress ← user decision 2026-06-01 (replaces ARC)
+## Phase 1.6 — Ownership & borrow checker · STATUS: [x] done (awaiting review) ← user decision 2026-06-01 (replaces ARC)
 
 Full Rust-style ownership, checked statically by a new `borrowck` pass that runs from
 `checker::check` after a clean type check (so it has a reliable `TypeTable`). The
@@ -103,7 +103,12 @@ back-end relies on for deterministic drop. Seeds already present: `check_borrow_
   > - **Reborrows:** `let r2 = &*r1` must know `r2` reaches the same root as `r1` through the borrow chain; sound tracking wants the MIR's explicit places/regions.
   >
   > Two more are **intentionally conservative, matching Rust** (not bugs): **index borrows** (`&a[0]` locks the whole array — indices are dynamic; disjointness needs an explicit API like `split_at_mut`), and the **built-in mutating-method list** is hand-maintained.
-- [ ] 1.6.5 Drop & ownership-aware codegen contract (deterministic destruction order; what MIR must carry)
+- [x] 1.6.5 **Drop & ownership-aware codegen contract** — the front-end now classifies which types own heap and need a `drop` (`TypeChecker::ty_needs_drop`): heap-owning built-ins (`str`/`List`/`Map`/`Set`/future) and any aggregate transitively containing one; scalars/refs/raw pointers/slices/`fn` don't. Surfaced via `la3 layout` (`drop=yes/no` per struct/enum) and battery `tests/drops.rs`. This is the front-end half; the **contract MIR 3.5 must honour**:
+  - _What:_ drop a value iff `ty_needs_drop`.
+  - _When:_ each owned binding is dropped at the end of its scope (or, once NLL lands on the MIR CFG, at its last use), in **reverse declaration order**.
+  - _Skip moved:_ a binding moved out (per the 1.6.1–1.6.3 move analysis) is **not** dropped — its new owner is responsible. A *conditionally* moved binding needs a runtime **drop flag**.
+  - _Partial moves:_ with the field-granular `Place` info, a value with one field moved out drops only its remaining fields.
+  - _Carry:_ MIR must thread, per scope, the owned locals + their move/borrow state so 3.5 inserts `drop`s (and drop flags) at exactly the proven-safe points.
 
 > **Back-end layering (why MIR is its own phase).** The pipeline is
 > `AST → [type + borrow check] → HIR → MIR → LLVM IR → object → link runtime`.
@@ -118,12 +123,28 @@ back-end relies on for deterministic drop. Seeds already present: `check_borrow_
 
 ## Phase 2 — HIR + desugaring · STATUS: [ ]
 
-Typed tree, all sugar removed, but still tree-shaped (no CFG yet).
+Typed tree, all sugar removed, every local resolved to a unique `BindingId`. Still
+tree-shaped (no CFG — that's MIR) and still generic (monomorphization is MIR 3.2).
 
-- [ ] 2.1 Define `hir.rs` (typed AST, no sugar)
-- [ ] 2.2 Lowering: f-strings → format calls; `?.`/`??` → nil match
-- [ ] 2.3 Lowering: `if let`/`while let`/`for..in` → match/iterator; compound `+=` etc.
-- [ ] 2.4 Explicit closures and captures in HIR
+**Agreed shape (2026-06-02):**
+
+- **`Ty` is shared** — extracted to `src/ty.rs` and **embedded** in every HIR node, so
+  the back-end never re-infers (typeck/borrowck/hir all use the one `Ty`).
+- **Bindings resolved in name resolution.** The resolver assigns a unique `BindingId`
+  to each binding site (`let`, param, pattern binding, closure param) and maps every
+  identifier *use* to its binding. **Shadowing is resolved there, once** — HIR (and
+  later passes) work on IDs and never reason about names/shadowing again. (The borrow
+  checker could later adopt these IDs in place of its name-based tracking.)
+- **`for..in` stays a typed HIR node**; the iteration *step* is lowered per iterable
+  kind in MIR (Range→counter, List→index, …) — no user-facing iterator trait in v1.
+- HIR carries **types + structure only**; ownership/borrow/drop facts are re-derived on
+  the MIR CFG (NLL needs the CFG anyway).
+
+- [ ] 2.1 Extract `Ty` into `src/ty.rs` (shared by `typeck`/`borrowck`/`hir`)
+- [ ] 2.2 Name resolution → unique `BindingId` per binding site + a resolution table (use → binding); shadowing resolved here
+- [ ] 2.3 Define `hir.rs` (typed, `BindingId`-based, no sugar) + `hir::lower(prog, &TypeTable, &Resolutions)`
+- [ ] 2.4 Desugarings: f-strings → `format`; `?.`/`??` → nil `match`; `if let`/`while let` → `match`; compound `+=` → `x = x + e`; `e?` → `match`+early return; typed `for` kept (step lowered in MIR)
+- [ ] 2.5 Explicit closures + captures (by-ref vs `move`) in HIR
 
 ## Phase 3 — MIR (the layer that makes the rest viable) · STATUS: [ ]
 
@@ -217,3 +238,4 @@ Codegen for the memory features (the _checking_ is Phase 1.6; the _lowering_ is 
 - 2026-06-02 — **Closed the 1.6.4 shared-borrow gap.** `SelfKind` now distinguishes `&self` (`Ref`) from `&mut self` (`RefMut`); the parser records it. New `borrowck::method_mutates` treats a method as an exclusive access to its receiver when the user method takes `&mut self`/`mut self`/`self`, or it's a known built-in in-place mutator (`push`/`pop`/`insert`/`remove`/`extend`/`clear`/`append`/`sort`). So `let r = &v; v.push(4)` is now rejected, while `v.len()` / `&self` methods under a shared borrow stay fine. No example regressions. 4 new/updated tests (28 in `tests/ownership.rs`). 116 tests pass.
 - 2026-06-02 — **Field-granular borrows + deferred-gap clarity.** Borrows now track a `Place` (root + projection path of `Field`/`Index`) instead of just the root, with `Place::overlaps` (prefix match; distinct fields are disjoint, any-index overlaps any-index). So `&u.name` no longer locks `u.age`, while a whole-value borrow still locks every field; the conflict message names the held place when it differs. (Fixed an infinite-recursion bug in `access_place_or_recurse` for non-rooted places like `foo().bar`, which had stack-overflowed `shapes`/`tls_record`.) **Recorded clearly in the plan** that NLL and reborrows are *not* soundly fixable on the AST (textual last-use is unsound under loop back-edges) and are deferred to a borrow-check pass over the MIR CFG (new Phase 3.7) — the same reason Rust borrow-checks on MIR; index-granularity and the builtin-mutator list stay intentionally conservative (Rust-faithful). 5 new field/index tests (32 in `tests/ownership.rs`). 120 tests pass.
 - 2026-06-02 — **Pinned the deferred gaps with pending tests.** Added three `#[ignore]`d tests in `tests/ownership.rs` (`nll_shared_borrow_dead_before_mutation_is_ok`, `nll_sequential_mut_borrows_are_ok`, `reborrow_releases_the_parent_after_use`) that assert the *correct* NLL/reborrow behavior. They fail today (`cargo test -- --ignored`, all rejected with aliasing-xor-mutability) and become green once Phase 3.7's MIR borrow-check lands — at which point the `#[ignore]` comes off. Default suite stays green (3 ignored). 120 tests pass + 3 ignored.
+- 2026-06-02 — **Phase 1.6.5 done → Phase 1.6 complete.** Added the drop classification `TypeChecker::ty_needs_drop` (heap-owning built-ins + any aggregate that transitively owns one; scalars/refs/pointers/slices/`fn` don't), surfaced as `drop=yes/no` per struct/enum in `la3 layout` and pinned by `tests/drops.rs` (8 tests). Wrote the **drop contract** MIR 3.5 must honour into the plan (what/when/skip-moved/partial-moves/what-MIR-carries). 128 tests pass, 0 warnings. **Phase 1.6 (ownership & borrow checker) is now complete** — move semantics + use-after-move, argument/receiver/move-closure moves, lexical borrow exclusivity (field-granular, method-mutation aware), dangling-return lifetimes, and the drop contract; NLL + reborrows are explicitly deferred to Phase 3.7 (MIR), pinned by `#[ignore]`d tests. Awaiting review before Phase 2 (HIR).

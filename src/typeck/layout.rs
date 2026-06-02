@@ -172,6 +172,33 @@ impl TypeChecker {
         )
     }
 
+    /// Does a value of this type own a heap resource that must be released by a
+    /// `drop` (reference Section 11, deterministic destruction)? Heap-owning
+    /// built-ins (`str`/`List`/`Map`/`Set`/futures) do; an aggregate does iff a
+    /// field/element/variant-payload does. Scalars, references, raw pointers,
+    /// slices (borrowed views), and `fn` do not. This is the front-end half of
+    /// the drop contract — MIR ownership-lowering (Phase 3.5) consumes it to
+    /// decide *where* to insert the drops the borrow check proved safe.
+    pub(super) fn ty_needs_drop(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Str | Ty::List(_) | Ty::Map(_, _) | Ty::Set(_) | Ty::Future(_) => true,
+            Ty::Tuple(ts) => ts.iter().any(|x| self.ty_needs_drop(x)),
+            Ty::Array(e, _) => self.ty_needs_drop(e),
+            Ty::Struct(name, args) => self
+                .struct_fields_resolved(name, args)
+                .is_some_and(|fs| fs.iter().any(|(_, ft)| self.ty_needs_drop(ft))),
+            Ty::Enum(name, args) => self
+                .enum_variants_resolved(name, args)
+                .is_some_and(|vs| {
+                    vs.iter()
+                        .any(|(_, payload)| payload.iter().any(|(_, ft)| self.ty_needs_drop(ft)))
+                }),
+            // Scalars, `nil`/`()`/`!`, `&T`/`*T`, slices (borrowed), `fn`,
+            // generics, and unresolved types carry no owned heap.
+            _ => false,
+        }
+    }
+
     /// Full tagged-union layout of an enum.
     fn enum_layout_info(&self, name: &str, args: &[Ty]) -> Option<EnumLayoutInfo> {
         let variants = self.enum_variants_resolved(name, args)?;
@@ -275,6 +302,8 @@ pub struct StructLayout {
     pub size: u64,
     pub align: u64,
     pub fields: Vec<FieldLayout>,
+    /// Whether the type owns a heap resource needing a `drop` (Phase 1.6.5).
+    pub needs_drop: bool,
 }
 
 pub struct VariantLayout {
@@ -289,6 +318,8 @@ pub struct EnumLayout {
     pub tag_size: u64,
     pub payload_offset: u64,
     pub variants: Vec<VariantLayout>,
+    /// Whether the type owns a heap resource needing a `drop` (Phase 1.6.5).
+    pub needs_drop: bool,
 }
 
 /// The computed layouts of a program's concrete (non-generic) types, plus any
@@ -307,8 +338,11 @@ impl Layouts {
         let mut out = String::new();
         for s in &self.structs {
             out.push_str(&format!(
-                "struct {}  size={} align={}\n",
-                s.name, s.size, s.align
+                "struct {}  size={} align={} drop={}\n",
+                s.name,
+                s.size,
+                s.align,
+                if s.needs_drop { "yes" } else { "no" }
             ));
             for f in &s.fields {
                 out.push_str(&format!(
@@ -319,8 +353,13 @@ impl Layouts {
         }
         for e in &self.enums {
             out.push_str(&format!(
-                "enum {}  size={} align={} tag={}B payload@{}\n",
-                e.name, e.size, e.align, e.tag_size, e.payload_offset
+                "enum {}  size={} align={} tag={}B payload@{} drop={}\n",
+                e.name,
+                e.size,
+                e.align,
+                e.tag_size,
+                e.payload_offset,
+                if e.needs_drop { "yes" } else { "no" }
             ));
             for v in &e.variants {
                 if v.fields.is_empty() {
@@ -373,11 +412,14 @@ pub fn dump_layouts(prog: &Program) -> Layouts {
                                 }
                             })
                             .collect();
+                        let needs_drop =
+                            tc.ty_needs_drop(&Ty::Struct(s.name.clone(), Vec::new()));
                         structs.push(StructLayout {
                             name: s.name.clone(),
                             size,
                             align,
                             fields,
+                            needs_drop,
                         });
                     }
                     None => skipped.push(format!("struct {} (unsized field)", s.name)),
@@ -415,6 +457,7 @@ pub fn dump_layouts(prog: &Program) -> Layouts {
                                 }
                             })
                             .collect();
+                        let needs_drop = tc.ty_needs_drop(&Ty::Enum(e.name.clone(), Vec::new()));
                         enums.push(EnumLayout {
                             name: e.name.clone(),
                             size: info.size,
@@ -422,6 +465,7 @@ pub fn dump_layouts(prog: &Program) -> Layouts {
                             tag_size: info.tag_size,
                             payload_offset: info.payload_offset,
                             variants: vlayouts,
+                            needs_drop,
                         });
                     }
                     _ => skipped.push(format!("enum {} (unsized payload)", e.name)),
