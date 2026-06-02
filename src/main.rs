@@ -16,6 +16,7 @@ mod diag;
 mod interp;
 mod lexer;
 mod parser;
+mod ty;
 mod typeck;
 
 use std::process::exit;
