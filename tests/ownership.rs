@@ -212,3 +212,161 @@ fn move_closure_capturing_a_copy_value_is_fine() {
     // An `i32` is `Copy`, so a `move` closure copies it — the original stays usable.
     ok("fn main() { let n = 7; let f = move || n + 1; io.println(f()); io.println(n) }");
 }
+
+// ---------------------------------------------------------------------------
+// 1.6.4 — borrow regions: `&mut` exclusivity & lifetimes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn using_a_value_while_mutably_borrowed_is_rejected() {
+    rejects(
+        "fn main() { let mut v = [1, 2, 3]; let r = &mut v; v.push(4); io.println(r) }",
+        "while it is mutably borrowed by `r`",
+    );
+}
+
+#[test]
+fn reassigning_a_value_while_shared_borrowed_is_rejected() {
+    // A shared borrow forbids writes to the borrowed place (here, reassignment).
+    rejects(
+        "fn main() { let mut v = [1, 2, 3]; let r = &v; v = [4, 5]; io.println(r) }",
+        "while it is borrowed by `r`",
+    );
+}
+
+#[test]
+fn mutating_via_a_method_while_shared_borrowed_is_rejected() {
+    // `push` mutates its receiver, so it conflicts with a live shared borrow.
+    rejects(
+        "fn main() { let mut v = [1, 2, 3]; let r = &v; v.push(4); io.println(r) }",
+        "cannot mutate `v`",
+    );
+}
+
+#[test]
+fn read_only_method_while_shared_borrowed_is_fine() {
+    // `len`/`&self` methods only read, so they coexist with a shared borrow.
+    ok("fn main() { let v = [1, 2, 3]; let r = &v; io.println(v.len()); io.println(r.len()) }");
+}
+
+#[test]
+fn mut_self_method_while_borrowed_is_rejected() {
+    // A user `&mut self` method mutates, so it conflicts with a live borrow.
+    rejects(
+        "struct B { v: List<i32> }\n\
+         impl B { fn add(&mut self, x: i32) { self.v.push(x) } fn size(&self) -> i32 { self.v.len() as i32 } }\n\
+         fn main() { let mut b = B { v: [1] }; let r = &b; b.add(2); io.println(r.size()) }",
+        "cannot mutate `b`",
+    );
+}
+
+#[test]
+fn reading_a_value_while_shared_borrowed_is_fine() {
+    // A shared borrow permits other reads (`&` xor `&mut`).
+    ok("fn main() { let v = [1, 2, 3]; let r = &v; io.println(v.len()); io.println(r.len()) }");
+}
+
+#[test]
+fn two_mutable_borrows_at_once_are_rejected() {
+    rejects(
+        "fn main() { let mut v = [1, 2, 3]; let a = &mut v; let b = &mut v; io.println(a); io.println(b) }",
+        "aliasing xor mutability",
+    );
+}
+
+#[test]
+fn passing_a_mut_ref_directly_does_not_lock_the_value() {
+    // A `&mut n` created as a call argument is a within-call borrow; after the
+    // call the value is free again (the memory.la3 idiom).
+    ok("fn bump(x: &mut i32) { *x += 1 }\nfn main() { let mut n = 1; bump(&mut n); io.println(n) }");
+}
+
+#[test]
+fn returning_a_reference_to_a_local_is_rejected() {
+    rejects(
+        "fn dangle() -> &i32 { let x = 5; &x }\nfn main() { io.println(0) }",
+        "reference to local `x`",
+    );
+}
+
+#[test]
+fn a_borrow_ends_with_its_block() {
+    // `r` is confined to the inner block, so `v` is free again afterward.
+    ok("fn main() { let mut v = [1, 2, 3]; { let r = &mut v; io.println(r.len()) } v.push(4); io.println(v.len()) }");
+}
+
+// ---------------------------------------------------------------------------
+// 1.6.4 — field-granular borrows (disjoint fields don't conflict)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn borrowing_one_field_leaves_other_fields_free() {
+    // `&u.name` must not lock `u.age` — they are disjoint memory.
+    ok(
+        "struct U { name: str, age: i32 }\n\
+         fn main() { let mut u = U { name: \"a\", age: 1 }; let r = &u.name; u.age = 30; io.println(r) }",
+    );
+}
+
+#[test]
+fn borrowing_a_field_locks_that_same_field() {
+    rejects(
+        "struct U { name: str, age: i32 }\n\
+         fn main() { let mut u = U { name: \"a\", age: 1 }; let r = &u.name; u.name = \"b\"; io.println(r) }",
+        "cannot mutate `u.name`",
+    );
+}
+
+#[test]
+fn borrowing_the_whole_value_locks_every_field() {
+    // A borrow of `u` (no projection) covers all of its fields: mutating `u.age`
+    // conflicts, and the message names the held place (`u`).
+    rejects(
+        "struct U { name: str, age: i32 }\n\
+         fn main() { let mut u = U { name: \"a\", age: 1 }; let r = &u; u.age = 30; io.println(r.age) }",
+        "cannot mutate `u.age` while `u` is borrowed by `r`",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Deferred to MIR (Phase 3.7) — NLL & reborrows.
+//
+// These assert the *correct* (Rust-accurate) behaviour: the code below is
+// memory-safe and a precise borrow checker accepts it. The current AST pass is a
+// sound lexical over-approximation, so it (wrongly) rejects them today — hence
+// `#[ignore]`. Run `cargo test -- --ignored` to watch them fail now; when the
+// MIR-based borrow check lands (Phase 3.7), delete the `#[ignore]` and they go
+// green. They must NEVER be weakened to pass early.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore = "needs NLL (borrow ends at last use) — MIR borrow-check, Phase 3.7"]
+fn nll_shared_borrow_dead_before_mutation_is_ok() {
+    // `r`'s last use is `r.len()`; afterwards `v` is free to mutate.
+    ok("fn main() { let mut v = [1, 2, 3]; let r = &v; io.println(r.len()); v.push(4); io.println(v.len()) }");
+}
+
+#[test]
+#[ignore = "needs NLL (borrow ends at last use) — MIR borrow-check, Phase 3.7"]
+fn nll_sequential_mut_borrows_are_ok() {
+    // `a` is dead after `a.push(1)`, so taking `b = &mut v` next is safe.
+    ok("fn main() { let mut v = [1, 2, 3]; let a = &mut v; a.push(1); let b = &mut v; b.push(2); io.println(v.len()) }");
+}
+
+#[test]
+#[ignore = "needs reborrow tracking (`&mut *r`) — MIR borrow-check, Phase 3.7"]
+fn reborrow_releases_the_parent_after_use() {
+    // `r2` reborrows `x` through `r1`; once `r2` is done, `r1` is usable again.
+    ok("fn main() { let mut x = 5; let r1 = &mut x; let r2 = &mut *r1; *r2 += 1; *r1 += 1; io.println(x) }");
+}
+
+#[test]
+fn distinct_indices_are_conservatively_treated_as_one() {
+    // Indices are dynamic, so `&a[0]` conservatively locks the whole array's
+    // elements (faithful to Rust's borrow checker — index disjointness needs an
+    // explicit API). A write to another index is therefore still rejected.
+    rejects(
+        "fn main() { let mut a: [i32; 3] = [1, 2, 3]; let r = &a[0]; a[1] = 9; io.println(r) }",
+        "while it is borrowed by `r`",
+    );
+}

@@ -83,9 +83,10 @@ impl Parser {
             // self receivers
             if self.at(&Tok::Amp) {
                 self.bump();
-                let _m = self.eat(&Tok::Mut);
+                let is_mut = self.eat(&Tok::Mut);
                 if self.eat(&Tok::SelfKw) {
-                    self_kind = SelfKind::Ref; // `&self` / `&mut self` borrows
+                    // `&self` shares, `&mut self` exclusively borrows.
+                    self_kind = if is_mut { SelfKind::RefMut } else { SelfKind::Ref };
                     params.push(Param {
                         name: "self".into(),
                         ty: None,

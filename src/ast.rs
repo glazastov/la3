@@ -50,16 +50,18 @@ pub enum Item {
 }
 
 /// How a method takes its receiver (reference Section 6). The borrow checker
-/// needs this: `self`/`mut self` *consume* the receiver, `&self`/`&mut self`
-/// only *borrow* it. Free functions and associated functions have no receiver.
+/// needs this: `self`/`mut self` *consume* the receiver, `&self` *shares* it,
+/// `&mut self` *exclusively borrows* it. Free/associated functions have none.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SelfKind {
     /// No `self` receiver (a free or associated function).
     None,
     /// `self` or `mut self` — takes the receiver by value (consumes it).
     Value,
-    /// `&self` or `&mut self` — borrows the receiver.
+    /// `&self` — shared (read-only) borrow of the receiver.
     Ref,
+    /// `&mut self` — exclusive (mutable) borrow of the receiver.
+    RefMut,
 }
 
 #[derive(Clone, Debug)]
