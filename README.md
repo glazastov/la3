@@ -19,6 +19,7 @@ la3 ast    <file.la3>    # parse and print the AST
 la3 tokens <file.la3>    # print the token stream
 la3 types  <file.la3>    # print the inferred type of every expression
 la3 layout <file.la3>    # print the by-value byte layout of structs and enums
+la3 resolve <file.la3>   # print name resolution: each binding and the binding every local use refers to
 la3 build  <file.la3>    # compile to a native binary (WIP — see COMPILER_PLAN.md)
 ```
 
