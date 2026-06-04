@@ -171,6 +171,19 @@ fn try_on_result_desugars_to_ok_err_match_with_return() {
 }
 
 #[test]
+fn try_on_option_desugars_to_some_none_match_returning_nil() {
+    // `e?` on an Option → `match e { Some(v) => v, None => return nil }`. The
+    // `nil` early return (not `None`) matches the interpreter oracle.
+    let src = "fn pick(o: Option<i64>) -> Option<i64> { let v = o?; Some(v + 1) }\nfn main() {}";
+    let dump = hir(src);
+    assert!(dump.contains("arm Some(#"), "Some arm binds:\n{}", dump);
+    assert!(dump.contains("arm None"), "None arm:\n{}", dump);
+    // The None arm early-returns `nil`, not a `None` constructor.
+    assert!(dump.contains("return"), "early return present:\n{}", dump);
+    assert!(!dump.contains("Global(None)"), "returns nil, not None:\n{}", dump);
+}
+
+#[test]
 fn compound_assign_desugars_to_plain_assign_plus_binary() {
     // `n += 5` → `n = n + 5`.
     let dump = hir("fn main() { let mut n = 0; n += 5 }");
