@@ -57,6 +57,15 @@ impl TypeTable {
         self.map.get(&id).map(display_ty)
     }
 
+    /// The raw semantic [`Ty`] of a node, for HIR lowering (Phase 2.3 onward),
+    /// which embeds the type directly rather than re-inferring it. `None` if the
+    /// node was never typed. After `check_types` the recorded types are concrete
+    /// (the literal defaults are pinned), so the HIR never observes `IntLit`/
+    /// `FloatLit`.
+    pub(crate) fn ty_of(&self, id: NodeId) -> Option<&Ty> {
+        self.map.get(&id)
+    }
+
     /// Is the value of node `id` implicitly copyable (so reusing the binding
     /// after a by-value use is fine)? Consumed by the borrow checker
     /// ([`crate::borrowck`]). A node with no recorded type is treated as Copy so

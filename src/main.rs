@@ -13,6 +13,7 @@ mod ast;
 mod borrowck;
 mod checker;
 mod diag;
+mod hir;
 mod interp;
 mod lexer;
 mod parser;
@@ -24,7 +25,7 @@ use std::process::exit;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        eprintln!("usage: la3 <run|check|build|ast|tokens|types|layout|resolve> <file.la3>");
+        eprintln!("usage: la3 <run|check|build|ast|tokens|types|layout|resolve|hir> <file.la3>");
         exit(2);
     }
     let cmd = args[1].as_str();
@@ -80,6 +81,27 @@ fn main() {
                 eprintln!("{} error(s)", res.errors.len());
                 exit(1);
             }
+        }
+        "hir" => {
+            // Debug view: the typed, BindingId-based HIR (Phase 2.3). Lowers the
+            // program after a clean front-end run and dumps the tree with the
+            // type and binding id embedded in each node.
+            let prog = match parser::parse(&src) {
+                Ok(p) => p,
+                Err(d) => fail(&d, path, &src),
+            };
+            let errs = checker::check(&prog);
+            if !errs.is_empty() {
+                for d in &errs {
+                    eprintln!("{}\n", d.render(path, &src));
+                }
+                eprintln!("{} error(s)", errs.len());
+                exit(1);
+            }
+            let res = checker::resolve(&prog);
+            let table = typeck::check_types(&prog);
+            let hir = hir::lower(&prog, &table, &res);
+            print!("{}", hir.dump());
         }
         "layout" => {
             // Debug view: the by-value byte layout of every concrete struct and
