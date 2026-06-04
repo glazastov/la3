@@ -42,6 +42,49 @@ now in scope** (no longer deferred) — see the new Phase 1.6.
 
 ---
 
+## North Star — pillars beyond v1 (recorded 2026-06-04)
+
+These are **durable goals**, not v1 deliverables. They are written here so every
+phase keeps them in view and makes choices that don't paint us into a corner. We
+are not in a hurry — they are to be done _well_.
+
+### Pillar 1 — one language, low-level **and** high-level
+
+La3 must be good enough to write a Raspberry Pi Pico bootloader, kernel, and
+bare-metal programs **and** to write web apps and PC applications. The _front-end
+already serves both_: exact-width integers, ownership + borrow checking, raw
+pointers / `unsafe`, and C-style by-value layout are exactly what bare-metal
+needs; nothing is wasted. The real split is the **runtime + target**, not the
+language.
+
+### Pillar 2 — the **à-la-carte dynamic stdlib** (the chosen answer to "embedded", _not_ `no_std`)
+
+We explicitly **reject a `no_std` split**. Instead the standard library is a set
+of **many small, fully independent modules**, and the build pulls in **only what
+the program actually uses**. Precisely (user decision 2026-06-04, a core pillar):
+
+- **Independence is the invariant.** Each stdlib module is self-contained: used
+  _alone_, it must depend on **nothing** else. No hard inter-module edges.
+- **Opportunistic sharing when co-present.** If a program uses `stdlibA` _and_
+  `stdlibB`, and `A` could be implemented more cheaply by reusing something `B`
+  already brings in, then `A` **may** fold onto `B`'s implementation — becoming
+  smaller — _without_ ever making `A` depend on `B` in the alone case. Sharing is
+  an optimization that only ever _removes_ duplication already present.
+- **Two build modes.** A build flag (e.g. `--stdlib granular`) selects the
+  independent + opportunistic-sharing + aggressive dead-code-elimination mode
+  (small binaries: Pico, kernels). The **default** mode compiles the whole stdlib
+  freely interdependent, tuned for full apps on PC/Web.
+- **Behavioural identity.** A granular build and a monolithic build of the _same_
+  program must behave identically; only size/layout differ. (This is the headline
+  conformance test for the feature.)
+
+**Cross-cutting hooks (so we don't block this later):** author the **runtime
+(Phase 4)** as independent modules from the start; lean on **MIR monomorphization
+/ reachability (3.2)** as the dead-code substrate; keep the **driver/link step
+(11.1)** mode-aware. The mechanism itself is **Phase 12**.
+
+---
+
 ## Status convention
 
 - `[ ]` not started · `[~]` in progress · `[x]` done and verified (build+test+verify)
@@ -236,6 +279,34 @@ Codegen for the memory features (the _checking_ is Phase 1.6; the _lowering_ is 
 - [ ] 11.2 Conformance: interp×compiled differential over all `examples/` + `tests/`
 - [ ] 11.3 Golden IR tests; (future) DWARF debug info
 
+## Phase 12 — À-la-carte dynamic stdlib · STATUS: [ ] ← Pillar 2; no rush, do it _well_
+
+The flagship that lets one stdlib serve both Pico-class bare-metal and full
+PC/Web apps. Prereqs: a working backend + runtime (Phases 4–5) and MIR
+reachability (3.2). **These subparts are a design skeleton; the open questions
+are pinned so the eventual design is chosen deliberately, not by accident.**
+
+- [ ] 12.1 **Author the stdlib as independent modules** — split the runtime/stdlib
+      into small modules, each self-contained (works _alone_ with zero deps), each
+      with a manifest of exported symbols + the "capabilities" it provides/wants.
+- [ ] 12.2 **Reachability-driven DCE** — from `main`, compute the used-symbol
+      closure (reuse the MIR 3.2 monomorphization/reachability walk) and emit only
+      reached module code. This alone gives "only what you used" in granular mode.
+- [ ] 12.3 **Capability / provider model for opportunistic sharing** — shared
+      primitives are weak/overridable; a module ships a private fallback (keeps it
+      independent), and when a _canonical provider_ of that capability is already in
+      the build, fallbacks fold onto it (linker COMDAT/ICF-style, or a pre-codegen
+      rewrite we control on MIR). **Open Qs:** deterministic provider precedence;
+      where folding happens (our MIR pass vs the linker); how a module _declares_
+      "I can provide / I can consume capability X" without creating an alone-dep.
+- [ ] 12.4 **Two build modes** — `--stdlib granular` (independent + opportunistic
+      sharing + aggressive DCE; embedded/Pico, smallest binaries) vs the **default**
+      monolithic mode (whole stdlib freely interdependent; PC/Web). Wire the mode
+      through the driver (11.1).
+- [ ] 12.5 **Conformance + size** — a granular build and a monolithic build of the
+      same program must be **behaviourally identical** (differential vs the
+      interpreter oracle); only size differs. Track binary-size benchmarks per mode.
+
 ---
 
 ## Progress log
@@ -259,6 +330,7 @@ Codegen for the memory features (the _checking_ is Phase 1.6; the _lowering_ is 
 - 2026-06-02 — **Phase 1.6.5 done → Phase 1.6 complete.** Added the drop classification `TypeChecker::ty_needs_drop` (heap-owning built-ins + any aggregate that transitively owns one; scalars/refs/pointers/slices/`fn` don't), surfaced as `drop=yes/no` per struct/enum in `la3 layout` and pinned by `tests/drops.rs` (8 tests). Wrote the **drop contract** MIR 3.5 must honour into the plan (what/when/skip-moved/partial-moves/what-MIR-carries). 128 tests pass, 0 warnings. **Phase 1.6 (ownership & borrow checker) is now complete** — move semantics + use-after-move, argument/receiver/move-closure moves, lexical borrow exclusivity (field-granular, method-mutation aware), dangling-return lifetimes, and the drop contract; NLL + reborrows are explicitly deferred to Phase 3.7 (MIR), pinned by `#[ignore]`d tests. Awaiting review before Phase 2 (HIR).
 - 2026-06-02 — **Phase 2.1 done.** Extracted the semantic type into `src/ty.rs` (`Ty`/`IntKind`/`FloatKind` + `impl Ty` helpers + `display_ty`/`int_kind`/`ty_is_copy`), now `pub(crate)` and shared. `typeck` glob-imports it (`use crate::ty::*`); its submodules keep `use super::*` (the glob re-export chains through). Pure mechanical refactor — `cargo build` clean (0 warnings), 128 tests pass + 3 ignored, `la3 types`/`layout` unchanged. Sets up HIR (2.3) to embed `Ty` directly. Awaiting review before 2.2.
 - 2026-06-02 — **`Ty` review (post-2.1).** Confirmed/recorded: `str` is **owned** (String-like, dropped), `&[u8]` is the borrowed form; derived **`Eq + Hash`** on `Ty`/`IntKind`/`FloatKind` for MIR 3.2 monomorphization keying; documented the `IntLit`/`FloatLit`-never-in-HIR invariant and the deferred items (`Ref`/`Ptr` mut-erasure, `Fn`/`Union` representation, `Unknown` must be concrete by codegen). Doc comments added to `src/ty.rs`. 128 tests pass + 3 ignored, 0 warnings.
+- 2026-06-04 — **North Star recorded (no code).** Captured two durable pillars from the user: (1) one language for low-level (Pico bootloader/kernel) **and** high-level (web/PC) — the front-end already fits both; the split is runtime/target. (2) The **à-la-carte dynamic stdlib** — explicitly **not** `no_std`: many small fully-independent modules, only the used ones linked, with **opportunistic sharing** when two co-present modules can dedupe (never creating a dependency in the alone case), plus a granular vs monolithic build mode. Added a "North Star" section + a dedicated **Phase 12** skeleton with the open design questions pinned. No rush; to be done well.
 - 2026-06-04 — **Phase 2.4 done.** Desugarings now run inside `hir::lower`, so HIR carries **no surface sugar**: f-strings → `+`-concat of `Str` literals and a new `HExprKind::Format{value,spec}` primitive (runtime honours the spec in 4.3); `??`/`?.` → `match` on `nil`; `e?` → type-directed `match`+early-return (`Result` reconstructs `Err`, `Option`/bare returns `nil` — matching the interpreter oracle, not the reference's "None"); `+=` → `x = x + e`; `while let` → `loop { match … _ => break }`. Removed the now-dead sugar variants (`FStr`/`Coalesce`/`Try`/`WhileLet`, the `optional` flags, the compound `op`). Desugar temporaries get fresh **synthetic** `BindingId`s (`Lower::fresh`, based at the new `Resolutions::binding_count()`), so the real-id alignment assertion still holds across all 13 examples. Recorded three decisions in 2.4 (no `if let` in the grammar; `?`-on-None → `nil`; `+=` re-evaluates the place — a MIR concern). 150 tests pass (+7 in `tests/hir.rs`, 16 total) + 3 ignored, 0 warnings. Interpreter oracle unchanged. Awaiting review before 2.5.
 - 2026-06-04 — **Phase 2.3 done.** New `src/hir.rs`: a typed, `BindingId`-based HIR + `hir::lower(prog, &TypeTable, &Resolutions)`. Every `HExpr` embeds its `Ty` (from a new `TypeTable::ty_of`), local uses are `Local(BindingId)` / globals `Global(name)` (from `Resolutions::binding_of`), and binding *sites* (which carry no `NodeId`) recover their id with a sequential counter that mirrors name resolution's pre-order allocation walk — a `debug_assert_eq!` against `Resolutions::name` makes any drift loud (held across all 13 examples). A standalone `TyResolver` lowers param/field/return `TypeExpr`s to `Ty` (mirrors `typeck::resolve_in` over the program's nominal decls). Lowering is faithful 1:1; the listed **desugarings stay for 2.4**, so sugar variants (`FStr`/`Coalesce`/compound `Assign`/`WhileLet`/`?.`-`optional`/`Try`) are retained. New `la3 hir` debug command + battery `tests/hir.rs` (9 tests). 143 tests pass + 3 ignored, 0 warnings. Awaiting review before 2.4.
 - 2026-06-02 — **Phase 2.2 done.** Name resolution now assigns a unique `BindingId` (new in `ast.rs`) to every value binding site and maps each local `Ident`/`self` use → its binding, with scopes as `Vec<HashMap<String, BindingId>>`. Shadowing is resolved here, once (proven by `la3 resolve` on `let x; let y=x; let x`: the two uses of `x` target `#0` vs `#2`). Globals/builtins still resolve by name (no id). New `checker::resolve(prog) -> Resolutions` (used by `check`), debug command `la3 resolve`, and battery `tests/resolve.rs` (6 tests). 134 tests pass + 3 ignored, 0 warnings. Sets up HIR (2.3) to be `BindingId`-based. Awaiting review before 2.3.
