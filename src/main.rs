@@ -17,6 +17,7 @@ mod hir;
 mod interp;
 mod lexer;
 mod mir;
+mod mirgen;
 mod parser;
 mod ty;
 mod typeck;
@@ -26,7 +27,9 @@ use std::process::exit;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        eprintln!("usage: la3 <run|check|build|ast|tokens|types|layout|resolve|hir> <file.la3>");
+        eprintln!(
+            "usage: la3 <run|check|build|ast|tokens|types|layout|resolve|hir|mir> <file.la3>"
+        );
         exit(2);
     }
     let cmd = args[1].as_str();
@@ -81,6 +84,31 @@ fn main() {
                 }
                 eprintln!("{} error(s)", res.errors.len());
                 exit(1);
+            }
+        }
+        "mir" => {
+            // Debug view: the MIR control-flow graph (Phase 3.2). Lowers HIR → MIR
+            // for every function that the core lowering supports, and lists the
+            // ones it skips (match/closures/etc.) with the reason.
+            let prog = match parser::parse(&src) {
+                Ok(p) => p,
+                Err(d) => fail(&d, path, &src),
+            };
+            let errs = checker::check(&prog);
+            if !errs.is_empty() {
+                for d in &errs {
+                    eprintln!("{}\n", d.render(path, &src));
+                }
+                eprintln!("{} error(s)", errs.len());
+                exit(1);
+            }
+            let res = checker::resolve(&prog);
+            let table = typeck::check_types(&prog);
+            let hir = hir::lower(&prog, &table, &res);
+            let result = mirgen::lower(&hir);
+            print!("{}", result.program.dump());
+            for (name, reason) in &result.skipped {
+                println!("// fn {}: skipped — {}", name, reason);
             }
         }
         "hir" => {
