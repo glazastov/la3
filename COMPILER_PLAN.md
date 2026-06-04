@@ -59,6 +59,10 @@ language.
 
 ### Pillar 2 — the **à-la-carte dynamic stdlib** (the chosen answer to "embedded", _not_ `no_std`)
 
+> **Full technical specification: [DYNAMIC_STDLIB.md](DYNAMIC_STDLIB.md)** — the
+> authoritative design (requirements R1–R6, module/capability model, the resolver
+> and its fixpoint, the two build modes, ABI, worked examples, open questions).
+
 We explicitly **reject a `no_std` split**. Instead the standard library is a set
 of **many small, fully independent modules**, and the build pulls in **only what
 the program actually uses**. Precisely (user decision 2026-06-04, a core pillar):
@@ -79,9 +83,10 @@ the program actually uses**. Precisely (user decision 2026-06-04, a core pillar)
   conformance test for the feature.)
 
 **Cross-cutting hooks (so we don't block this later):** author the **runtime
-(Phase 4)** as independent modules from the start; lean on **MIR monomorphization
-/ reachability (3.2)** as the dead-code substrate; keep the **driver/link step
-(11.1)** mode-aware. The mechanism itself is **Phase 12**.
+(Phase 4)** as independent modules from the start; lean on the **MIR reachability
+walk** (the call graph from `main`, available once HIR→MIR lowering lands in 3.2 —
+the same walk monomorphization 7.1 reuses) as the dead-code-elimination substrate;
+keep the **driver/link step (11.1)** mode-aware. The mechanism itself is **Phase 12**.
 
 ---
 
@@ -212,13 +217,30 @@ tree-shaped (no CFG — that's MIR) and still generic (monomorphization is MIR 3
 A CFG of basic blocks with explicit temporaries and typed locals. **Every hard
 transformation happens here**, so Phase 5 (LLVM) stays a thin translation.
 
-- [x] 3.1 Define `mir.rs` (data model only): Rust-MIR-like — `MirProgram`/`MirFn` with **typed locals** (`_0` = return, `_1..` = args, then user/temp, each a `LocalDecl{ty,kind,source,name}`) and a vector of `BasicBlock`s, each a run of `Statement`s + one `Terminator`. `Place` (local + `Projection::{Field,Index,Deref,Downcast}`), `Operand::{Copy,Move,Const}` (the ownership info 3.5 threads), `Rvalue::{Use,Binary,Unary,Cast,Ref,Aggregate}`, `Terminator::{Goto,Return,If,Switch,Call,Unreachable}` (Switch = the match-tree substrate for 3.3). **Explicit drop points** via `Statement::Drop` (inserted by 3.5). Plus a `MirBuilder` and a Rust-MIR-flavoured pretty-printer. **No HIR→MIR lowering and no `la3 mir` command yet** — those start at 3.6 (need the CFG-building machinery); the model is exercised by a hand-built `#[cfg(test)]` battery in `mir.rs` (5 tests). `#![allow(dead_code)]` (like `ast.rs`): the model is wired to producers across 3.2–3.7.
-- [ ] 3.2 **Monomorphization** — collect concrete generic instances, emit a specialized copy per instantiation (required for static layout)
-- [ ] 3.3 **Match → decision trees** (guards, ranges, `@`, or-patterns, exhaustive default)
-- [ ] 3.4 **Closure conversion** — closures → `{fn ptr, captured env}`; `move` vs by-ref capture made explicit
+> **Re-evaluated 2026-06-04 (user decisions).** Three changes from the original
+> numbering — end state unchanged, but the order now follows the real dependency
+> graph (lower to MIR, then run MIR passes, as Rust does):
+>
+> 1. The **HIR→MIR lowering** (listed last originally) is pulled to **3.2** — it is
+>    the substrate every other pass needs (no MIR to transform until it exists).
+> 2. **Monomorphization moved out to Phase 7** (Generics & interfaces). No milestone
+>    example is generic, so it is YAGNI for the first binary; mono is still a MIR
+>    pass, just scheduled when generics are actually exercised.
+> 3. **`match` gets its own subpart (3.3)**, separate from the core lowering: 2.4
+>    desugared `?`/`??`/`?.`/`while let` into `match`, so it is pervasive and worth
+>    compiling properly (guards, ranges, `@`, or-patterns, exhaustive default).
+>
+> **Phase 3 milestone:** `fib`, `fizzbuzz`, `shapes` lower to valid, dumpable MIR
+> (`la3 mir`) — mirrors the Phase 5 LLVM milestone. So drop insertion for
+> `fizzbuzz`'s strings is in scope; generics are not. (`fib`/`fizzbuzz` need only
+> the core lowering 3.2; `shapes` adds `match` 3.3.)
+
+- [x] 3.1 Define `mir.rs` (data model only): Rust-MIR-like — `MirProgram`/`MirFn` with **typed locals** (`_0` = return, `_1..` = args, then user/temp, each a `LocalDecl{ty,kind,source,name}`) and a vector of `BasicBlock`s, each a run of `Statement`s + one `Terminator`. `Place` (local + `Projection::{Field,Index,Deref,Downcast}`), `Operand::{Copy,Move,Const}` (the ownership info 3.5 threads), `Rvalue::{Use,Binary,Unary,Cast,Ref,Aggregate}`, `Terminator::{Goto,Return,If,Switch,Call,Unreachable}` (Switch = the match-tree substrate for 3.3). **Explicit drop points** via `Statement::Drop` (inserted by 3.5). Plus a `MirBuilder`, a Rust-MIR-flavoured pretty-printer, and a **`validate`** pass (`MirFn`/`MirProgram`) — an internal ICE-detector that checks the structural invariants (entry block exists, `_0` is the return slot and `_1..` are args, every referenced `Local`/`BlockId` is in range) so a bad lowering/transform is caught at its source; 3.2+ run it on their output. **No HIR→MIR lowering and no `la3 mir` command yet** — those are 3.2; the model is exercised by a hand-built `#[cfg(test)]` battery in `mir.rs` (8 tests). `#![allow(dead_code)]` (like `ast.rs`): the model is wired to producers across 3.2–3.6.
+- [ ] 3.2 **Lower HIR → MIR CFG** (the substrate) — build the CFG from HIR: straight-line code (literals, locals, `Binary`/`Unary`/`Cast`, calls, `Field`/`Index` places, `Assign`, `let`, `Format`, aggregates) and control flow (`if`/`loop`/`while`/`for`/`break`-with-value/`continue`/`return`/blocks). `match` and `Closure` are lowered to placeholders here and filled in by their own subparts (3.3, 3.4). Adds the `la3 mir` command. **Targets `fib`/`fizzbuzz`** of the phase milestone.
+- [ ] 3.3 **Match → decision trees** (its own subpart) — guards, ranges, `@`, or-patterns, exhaustive default; lowers `match` (pervasive after the 2.4 desugarings) into the `Switch`-based CFG. **Targets `shapes`** of the milestone.
+- [ ] 3.4 **Closure conversion** — closures → `{fn ptr, captured env}`; `move` vs by-ref capture made explicit (consumes the Phase 2.5 `HCapture` list)
 - [ ] 3.5 **Ownership lowering** — consume the Phase 1.6 borrow-check facts: insert deterministic `drop`s at end-of-scope/last-use, lower `&T`/`&mut T` to pointers, thread moves
-- [ ] 3.6 Lower HIR control flow (`if`/`loop`/`while`/`break`-with-value) into the CFG
-- [ ] 3.7 **Borrow-check refinement on the CFG** — the precision gaps Phase 1.6.4 can't do soundly on the AST: **NLL** (borrow liveness over the CFG, ends at last use) and **reborrows** (`&*r`). This is why Rust borrow-checks on MIR; the AST pass stays the sound lexical over-approximation until this lands. _Target behavior is already pinned by `#[ignore]`d tests in `tests/ownership.rs` (`nll__`, `reborrow\__`) — they fail today (`cargo test -- --ignored`) and turn green when this lands; delete their `#[ignore]` then.\_
+- [ ] 3.6 **Borrow-check refinement on the CFG** — the precision gaps Phase 1.6.4 can't do soundly on the AST: **NLL** (borrow liveness over the CFG, ends at last use) and **reborrows** (`&*r`). This is why Rust borrow-checks on MIR; the AST pass stays the sound lexical over-approximation until this lands. _Target behavior is already pinned by `#[ignore]`d tests in `tests/ownership.rs` (`nll__`, `reborrow\__`) — they fail today (`cargo test -- --ignored`) and turn green when this lands; delete their `#[ignore]` then.\_
 
 ## Phase 4 — Runtime library · STATUS: [ ]
 
@@ -251,10 +273,13 @@ Codegen for the memory features (the _checking_ is Phase 1.6; the _lowering_ is 
 
 ## Phase 7 — Generics & interfaces · STATUS: [ ]
 
-(Monomorphization itself is MIR 3.2; this is dispatch.)
+Generics are not exercised by any earlier milestone, so this is where they land —
+monomorphization included (moved here from MIR 3.2 on 2026-06-04; it is still a
+**MIR pass**, just scheduled when there is generic code to specialize).
 
-- [ ] 7.1 Interfaces: static dispatch via bounds
-- [ ] 7.2 Dynamic dispatch via vtables when needed
+- [ ] 7.1 **Monomorphization** — collect concrete generic instances reachable from `main`, emit a specialized MIR copy per instantiation (required for static layout). Runs as a MIR→MIR pass before codegen.
+- [ ] 7.2 Interfaces: static dispatch via bounds
+- [ ] 7.3 Dynamic dispatch via vtables when needed
 
 ## Phase 8 — Closures & higher-order methods · STATUS: [ ]
 
@@ -280,6 +305,10 @@ Codegen for the memory features (the _checking_ is Phase 1.6; the _lowering_ is 
 - [ ] 11.3 Golden IR tests; (future) DWARF debug info
 
 ## Phase 12 — À-la-carte dynamic stdlib · STATUS: [ ] ← Pillar 2; no rush, do it _well_
+
+**Spec: [DYNAMIC_STDLIB.md](DYNAMIC_STDLIB.md)** (authoritative). The subparts below
+are the implementation checklist; the design, invariants, and open questions live in
+that document.
 
 The flagship that lets one stdlib serve both Pico-class bare-metal and full
 PC/Web apps. Prereqs: a working backend + runtime (Phases 4–5) and MIR
@@ -331,6 +360,7 @@ are pinned so the eventual design is chosen deliberately, not by accident.**
 - 2026-06-02 — **Phase 2.1 done.** Extracted the semantic type into `src/ty.rs` (`Ty`/`IntKind`/`FloatKind` + `impl Ty` helpers + `display_ty`/`int_kind`/`ty_is_copy`), now `pub(crate)` and shared. `typeck` glob-imports it (`use crate::ty::*`); its submodules keep `use super::*` (the glob re-export chains through). Pure mechanical refactor — `cargo build` clean (0 warnings), 128 tests pass + 3 ignored, `la3 types`/`layout` unchanged. Sets up HIR (2.3) to embed `Ty` directly. Awaiting review before 2.2.
 - 2026-06-02 — **`Ty` review (post-2.1).** Confirmed/recorded: `str` is **owned** (String-like, dropped), `&[u8]` is the borrowed form; derived **`Eq + Hash`** on `Ty`/`IntKind`/`FloatKind` for MIR 3.2 monomorphization keying; documented the `IntLit`/`FloatLit`-never-in-HIR invariant and the deferred items (`Ref`/`Ptr` mut-erasure, `Fn`/`Union` representation, `Unknown` must be concrete by codegen). Doc comments added to `src/ty.rs`. 128 tests pass + 3 ignored, 0 warnings.
 - 2026-06-04 — **Phase 3.1 done.** New `src/mir.rs`: the MIR data model (Rust-MIR-like) — `MirProgram`/`MirFn` with typed locals (`_0` return, `_1..` args, then user/temp via `LocalDecl`+`LocalKind`), `BasicBlock` = `Statement`s + one `Terminator`; `Place`/`Projection`, `Operand::{Copy,Move,Const}`, `Rvalue::{Use,Binary,Unary,Cast,Ref,Aggregate}`, `Terminator::{Goto,Return,If,Switch,Call,Unreachable}`, explicit `Statement::Drop` points. Added a `MirBuilder` + a Rust-MIR-flavoured printer. **Scope decision:** 3.1 is the *definition* only (the plan splits the lowering across 3.2–3.6); no HIR→MIR lowering and no `la3 mir` command yet — both arrive at 3.6 with the CFG machinery. Exercised by a hand-built `#[cfg(test)]` battery (5 tests). `#![allow(dead_code)]` per the `ast.rs` precedent (model wired up over the phase). 162 tests pass (+5) + 3 ignored, 0 warnings; interpreter oracle unchanged. Awaiting review before 3.2.
+- 2026-06-04 — **Phase 3 re-evaluated + MIR validator added (user-directed).** Re-ordered Phase 3 to follow the real dependency graph: HIR→MIR lowering pulled to **3.2** (the substrate), **`match` given its own subpart (3.3)** (pervasive after the 2.4 desugarings), and **monomorphization moved out to Phase 7.1** (no milestone example is generic). Pinned a Phase-3 milestone (`fib`/`fizzbuzz`/`shapes` → dumpable MIR). Fixed the stale Pillar 2 hook (DCE leans on the **MIR reachability walk**, available at 3.2; mono is 7.1). Added a **`validate`** pass to `mir.rs` (`MirFn`/`MirProgram`) — an internal invariant checker (entry exists, `_0`=return/`_1..`=args, all `Local`/`BlockId` refs in range) that 3.2+ run on their output; 3 new tests (8 in `mir.rs`). 165 tests pass + 3 ignored, 0 warnings.
 - 2026-06-04 — **Phase 2 review (user-requested).** Critical pass over the HIR/desugar/capture code, focused on bugs the structural tests can't catch (no differential yet). Findings: (a) the type-directed `e?` is robust on the real corpus — every `?` operand types as `Enum("Result", …)` even when the payload is `Unknown` (`Result<_>`), so the Result-form is chosen correctly; (b) the **Option** form of `?` (`Some(v)=>v / None=>return nil`) was unexercised by examples/tests — verified it lowers and the interpreter oracle runs it (`pick(Some(5))→6`), and **added a regression test** (`try_on_option_…`, hir suite 23, total 157). Noted (not fixed — small refinements for MIR): the `?.` synthetic temp is typed `T | nil` rather than the stripped `T` (value is correct, only the temp's declared type is loose); closure captures collapse `&`/`&mut` to one `Ref` mode (mut-ness is re-derived on the MIR, consistent with the `Ty` mut-erasure decision). No correctness defect found. 157 pass, 0 warnings.
 - 2026-06-04 — **Phase 2.5 done → Phase 2 complete.** Closure captures are now explicit in HIR: `HExprKind::Closure` carries `captures: Vec<HCapture>` (binding + `Ty` + `CaptureMode::Ref|Value`), computed by `capture_set` over the **lowered** body using `BindingId`s (exact, no shadowing reasoning) — free = local uses whose binding is bound outside the closure; mode is by-ref by default, by-value for `move` (reference §6). Verified by-ref/`move`/no-capture/param-shadowing/nested-propagation/`self`-capture via `la3 hir`. 156 tests pass (+6 in `tests/hir.rs`, 22 total) + 3 ignored, 0 warnings; interpreter oracle unchanged. **Phase 2 (HIR + desugaring) is complete** — typed `BindingId`-based HIR, all surface sugar desugared, explicit captures. Next is Phase 3 (MIR). Awaiting review before Phase 3.
 - 2026-06-04 — **North Star recorded (no code).** Captured two durable pillars from the user: (1) one language for low-level (Pico bootloader/kernel) **and** high-level (web/PC) — the front-end already fits both; the split is runtime/target. (2) The **à-la-carte dynamic stdlib** — explicitly **not** `no_std`: many small fully-independent modules, only the used ones linked, with **opportunistic sharing** when two co-present modules can dedupe (never creating a dependency in the alone case), plus a granular vs monolithic build mode. Added a "North Star" section + a dedicated **Phase 12** skeleton with the open design questions pinned. No rush; to be done well.

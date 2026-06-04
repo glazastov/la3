@@ -321,6 +321,169 @@ impl MirBuilder {
 }
 
 // ---------------------------------------------------------------------------
+// Validation — cheap structural invariants of a well-formed MIR function
+// ---------------------------------------------------------------------------
+//
+// This is an *internal* sanity check (an ICE detector), not a user diagnostic:
+// if it fails, the lowering produced malformed MIR — a compiler bug, not a
+// program error. The HIR→MIR lowering (3.2) and every later MIR pass run it on
+// their output so a bad transformation is caught at its source rather than
+// surfacing as mysterious LLVM/codegen breakage.
+
+impl MirProgram {
+    /// Validate every function; returns all problems found (empty ⇒ valid).
+    pub fn validate(&self) -> Result<(), Vec<String>> {
+        let mut errs = Vec::new();
+        for f in &self.fns {
+            if let Err(mut e) = f.validate() {
+                for m in &mut e {
+                    *m = format!("fn {}: {}", f.name, m);
+                }
+                errs.append(&mut e);
+            }
+        }
+        if errs.is_empty() {
+            Ok(())
+        } else {
+            Err(errs)
+        }
+    }
+}
+
+impl MirFn {
+    /// Check the structural invariants: an entry block exists, `_0` is the return
+    /// slot and `_1..=arg_count` are arguments, and every [`Local`]/[`BlockId`]
+    /// referenced anywhere is in range. Returns the list of violations.
+    pub fn validate(&self) -> Result<(), Vec<String>> {
+        let mut errs = Vec::new();
+        let nlocals = self.locals.len() as u32;
+        let nblocks = self.blocks.len() as u32;
+
+        if self.blocks.is_empty() {
+            errs.push("no basic blocks (missing entry bb0)".to_string());
+        }
+        if self.locals.is_empty() {
+            errs.push("no locals (missing return slot _0)".to_string());
+        } else if self.locals[0].kind != LocalKind::Return {
+            errs.push("_0 must be the return slot".to_string());
+        }
+        if self.arg_count as u32 + 1 > nlocals {
+            errs.push(format!(
+                "arg_count {} but only {} locals",
+                self.arg_count, nlocals
+            ));
+        } else {
+            for i in 1..=self.arg_count {
+                if self.locals[i].kind != LocalKind::Arg {
+                    errs.push(format!("_{} should be an Arg local", i));
+                }
+            }
+        }
+
+        for (bi, b) in self.blocks.iter().enumerate() {
+            let ctx = format!("bb{}", bi);
+            for s in &b.stmts {
+                match s {
+                    Statement::Assign(p, rv) => {
+                        v_place(p, nlocals, &ctx, &mut errs);
+                        v_rvalue(rv, nlocals, &ctx, &mut errs);
+                    }
+                    Statement::Drop(p) => v_place(p, nlocals, &ctx, &mut errs),
+                    Statement::StorageLive(l) | Statement::StorageDead(l) => {
+                        v_local(*l, nlocals, &ctx, &mut errs)
+                    }
+                    Statement::Nop => {}
+                }
+            }
+            match &b.term {
+                Terminator::Goto(t) => v_block(*t, nblocks, &ctx, &mut errs),
+                Terminator::Return | Terminator::Unreachable => {}
+                Terminator::If {
+                    cond,
+                    then_blk,
+                    else_blk,
+                } => {
+                    v_operand(cond, nlocals, &ctx, &mut errs);
+                    v_block(*then_blk, nblocks, &ctx, &mut errs);
+                    v_block(*else_blk, nblocks, &ctx, &mut errs);
+                }
+                Terminator::Switch {
+                    discr,
+                    targets,
+                    default,
+                } => {
+                    v_operand(discr, nlocals, &ctx, &mut errs);
+                    for (_, t) in targets {
+                        v_block(*t, nblocks, &ctx, &mut errs);
+                    }
+                    v_block(*default, nblocks, &ctx, &mut errs);
+                }
+                Terminator::Call { func, args, dest } => {
+                    v_operand(func, nlocals, &ctx, &mut errs);
+                    for a in args {
+                        v_operand(a, nlocals, &ctx, &mut errs);
+                    }
+                    if let Some((p, t)) = dest {
+                        v_place(p, nlocals, &ctx, &mut errs);
+                        v_block(*t, nblocks, &ctx, &mut errs);
+                    }
+                }
+            }
+        }
+
+        if errs.is_empty() {
+            Ok(())
+        } else {
+            Err(errs)
+        }
+    }
+}
+
+fn v_local(l: Local, n: u32, ctx: &str, errs: &mut Vec<String>) {
+    if l.0 >= n {
+        errs.push(format!("{}: local _{} out of range (have {})", ctx, l.0, n));
+    }
+}
+
+fn v_block(b: BlockId, n: u32, ctx: &str, errs: &mut Vec<String>) {
+    if b.0 >= n {
+        errs.push(format!("{}: target bb{} out of range (have {})", ctx, b.0, n));
+    }
+}
+
+fn v_place(p: &Place, n: u32, ctx: &str, errs: &mut Vec<String>) {
+    v_local(p.local, n, ctx, errs);
+    for proj in &p.proj {
+        if let Projection::Index(l) = proj {
+            v_local(*l, n, ctx, errs);
+        }
+    }
+}
+
+fn v_operand(o: &Operand, n: u32, ctx: &str, errs: &mut Vec<String>) {
+    match o {
+        Operand::Copy(p) | Operand::Move(p) => v_place(p, n, ctx, errs),
+        Operand::Const(_) => {}
+    }
+}
+
+fn v_rvalue(rv: &Rvalue, n: u32, ctx: &str, errs: &mut Vec<String>) {
+    match rv {
+        Rvalue::Use(o) | Rvalue::Unary(_, o) | Rvalue::Cast(o, _) => v_operand(o, n, ctx, errs),
+        Rvalue::Binary(_, a, b) => {
+            v_operand(a, n, ctx, errs);
+            v_operand(b, n, ctx, errs);
+        }
+        Rvalue::Ref(p) => v_place(p, n, ctx, errs),
+        Rvalue::Aggregate(_, fields) => {
+            for f in fields {
+                v_operand(f, n, ctx, errs);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Pretty-printer (Rust-MIR-flavoured)
 // ---------------------------------------------------------------------------
 
@@ -614,6 +777,40 @@ mod tests {
             dest: Some((Place::local(Local(0)), BlockId(4))),
         };
         assert_eq!(fmt_term(&call), "_0 = call fib(move _2) -> bb4");
+    }
+
+    #[test]
+    fn validate_accepts_a_well_formed_function() {
+        assert!(add_fn().validate().is_ok());
+        assert!(MirProgram { fns: vec![add_fn()] }.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_flags_an_out_of_range_local() {
+        let mut f = add_fn();
+        // Reference a local that does not exist in bb0's first statement.
+        f.blocks[0].stmts[0] = Statement::Assign(
+            Place::local(Local(99)),
+            Rvalue::Use(Operand::Const(Const::Unit)),
+        );
+        let errs = f.validate().unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("_99 out of range")),
+            "{:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn validate_flags_an_out_of_range_block_target() {
+        let mut f = add_fn();
+        f.blocks[0].term = Terminator::Goto(BlockId(42));
+        let errs = f.validate().unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("bb42 out of range")),
+            "{:?}",
+            errs
+        );
     }
 
     #[test]
