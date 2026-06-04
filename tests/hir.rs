@@ -192,6 +192,60 @@ fn while_let_desugars_to_loop_match_break() {
     assert!(dump.contains("break"), "break in wildcard arm:\n{}", dump);
 }
 
+// ---------------------------------------------------------------------------
+// Phase 2.5 — explicit closure captures (by-ref vs move)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn closure_captures_outer_local_by_ref() {
+    // A plain closure borrows the free variable it uses.
+    let dump = hir("fn main() { let base = 10; let f = |x| x + base; io.println(f(5)) }");
+    assert!(dump.contains("Closure(move=false)"), "{}", dump);
+    assert!(dump.contains("captures(& #0: i32)"), "by-ref capture of base:\n{}", dump);
+}
+
+#[test]
+fn move_closure_captures_by_value() {
+    // `move` transfers ownership of the captured (non-Copy) value.
+    let dump = hir("fn main() { let s = \"hi\"; let f = move || s; io.println(f()) }");
+    assert!(dump.contains("Closure(move=true)"), "{}", dump);
+    assert!(dump.contains("captures(move #0: str)"), "by-value capture of s:\n{}", dump);
+}
+
+#[test]
+fn closure_using_only_params_captures_nothing() {
+    let dump = hir("fn main() { let g = |x| x * 2; io.println(g(21)) }");
+    assert!(dump.contains("captures()"), "no free variables:\n{}", dump);
+}
+
+#[test]
+fn closure_param_shadowing_outer_is_not_captured() {
+    // The closure's own `x` (a param) must not be treated as a capture of the
+    // outer `x`; they are distinct bindings.
+    let dump = hir("fn main() { let x = 1; let f = |x| x + 1; io.println(x + f(2)) }");
+    assert!(dump.contains("captures()"), "param shadows, nothing captured:\n{}", dump);
+}
+
+#[test]
+fn nested_closure_propagates_capture_outward() {
+    // The inner `|| n` captures `n`; the outer closure must also capture `n` to
+    // supply it, but not the inner-bound `g`.
+    let dump = hir("fn main() { let n = 3; let outer = || { let g = || n; g() }; io.println(outer()) }");
+    // `n` is #0; both closures capture it.
+    let caps = dump.matches("captures(& #0: i32)").count();
+    assert!(caps >= 2, "outer and inner both capture n:\n{}", dump);
+}
+
+#[test]
+fn closure_captures_self_in_a_method() {
+    let src = "struct C { k: i32 }\n\
+               impl C { fn make(&self) -> i32 { let f = || self.k; f() } }\n\
+               fn main() {}";
+    let dump = hir(src);
+    // `self` is binding #0 inside the method; the closure captures it by ref.
+    assert!(dump.contains("captures(& #0"), "self captured:\n{}", dump);
+}
+
 #[test]
 fn desugaring_temporaries_get_fresh_ids_past_real_bindings() {
     // `a` is the only real binding (#0); the `??` temporary must not reuse it.

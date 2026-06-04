@@ -25,6 +25,11 @@
 //! *synthetic* binding ids (see [`Lower::fresh`]) for their temporaries. The
 //! typed `for` loop is kept as an HIR node; its per-iterable step is lowered in
 //! MIR.
+//!
+//! Subpart **2.5** makes closure **captures explicit**: every [`HExprKind::Closure`]
+//! lists the free variables it captures ([`HCapture`]), each tagged by-reference
+//! (the default) or by-value (a `move` closure) — see [`capture_set`]. MIR 3.4
+//! turns that list into the closure's `{fn ptr, env}`.
 
 #![allow(dead_code)]
 
@@ -224,6 +229,11 @@ pub(crate) enum HExprKind {
     },
     Closure {
         params: Vec<HParam>,
+        /// The free variables the closure captures, made explicit (Phase 2.5).
+        /// Every local used in the body but bound outside it, each tagged with how
+        /// it is captured: by reference (the default) or by value (a `move`
+        /// closure). MIR 3.4 turns these into the closure's `{fn ptr, env}`.
+        captures: Vec<HCapture>,
         body: Box<HExpr>,
         is_move: bool,
     },
@@ -241,6 +251,25 @@ pub(crate) struct HCatchArm {
     pub binding: Option<BindingId>,
     pub ty: Option<String>,
     pub body: HBlock,
+}
+
+/// One variable a closure captures from its enclosing scope (Phase 2.5).
+pub(crate) struct HCapture {
+    pub binding: BindingId,
+    pub ty: Ty,
+    pub mode: CaptureMode,
+}
+
+/// How a closure captures a free variable. The default is [`CaptureMode::Ref`];
+/// a `move` closure captures every free variable [`CaptureMode::Value`]
+/// (reference Section 6).
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum CaptureMode {
+    /// By reference — the closure borrows the variable (the default).
+    Ref,
+    /// By value — the closure owns the variable (a `move` closure). A `Copy`
+    /// value is copied, so the original stays usable; a non-`Copy` value is moved.
+    Value,
 }
 
 pub(crate) struct HMatchArm {
@@ -779,10 +808,13 @@ impl<'a> Lower<'a> {
                             ty,
                         }
                     })
-                    .collect();
+                    .collect::<Vec<_>>();
+                let body = self.lower_expr(body);
+                let captures = capture_set(&params, &body, *is_move);
                 HExprKind::Closure {
                     params,
-                    body: Box::new(self.lower_expr(body)),
+                    captures,
+                    body: Box::new(body),
                     is_move: *is_move,
                 }
             }
@@ -1154,6 +1186,213 @@ impl<'a> Lower<'a> {
             pos,
         };
         self.mk(HExprKind::Block(block), Ty::Never, pos)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Closure capture analysis (Phase 2.5)
+// ---------------------------------------------------------------------------
+
+/// A closure's captures: the locals it uses that are bound *outside* it, each
+/// tagged by-reference (default) or by-value (`move`). One pass over the lowered
+/// body collects every binding introduced inside the closure (its params plus any
+/// nested `let`/pattern/closure-param) and every local *use* with its type; a use
+/// whose binding was not introduced inside is a capture. Order is deterministic
+/// (by binding id). Nested `fn`/`const` items are separate scopes and do not
+/// contribute (a named `fn`, unlike a closure, does not capture its environment).
+fn capture_set(params: &[HParam], body: &HExpr, is_move: bool) -> Vec<HCapture> {
+    let mut bound: HashSet<BindingId> = params.iter().map(|p| p.binding).collect();
+    let mut used: Vec<(BindingId, Ty)> = Vec::new();
+    walk(body, &mut bound, &mut used);
+    let mode = if is_move {
+        CaptureMode::Value
+    } else {
+        CaptureMode::Ref
+    };
+    let mut seen: HashSet<BindingId> = HashSet::new();
+    let mut caps: Vec<HCapture> = used
+        .into_iter()
+        .filter(|(id, _)| !bound.contains(id) && seen.insert(*id))
+        .map(|(binding, ty)| HCapture { binding, ty, mode })
+        .collect();
+    caps.sort_by_key(|c| c.binding.0);
+    caps
+}
+
+fn walk(e: &HExpr, bound: &mut HashSet<BindingId>, used: &mut Vec<(BindingId, Ty)>) {
+    match &e.kind {
+        HExprKind::Local(id) => used.push((*id, e.ty.clone())),
+        HExprKind::Int(_)
+        | HExprKind::Float(_)
+        | HExprKind::Str(_)
+        | HExprKind::Char(_)
+        | HExprKind::Bool(_)
+        | HExprKind::Nil
+        | HExprKind::Global(_)
+        | HExprKind::Path(_) => {}
+        HExprKind::Format { value, .. }
+        | HExprKind::Unary { expr: value, .. }
+        | HExprKind::Cast { expr: value, .. }
+        | HExprKind::Await(value)
+        | HExprKind::Field { recv: value, .. } => walk(value, bound, used),
+        HExprKind::Binary { lhs, rhs, .. } => {
+            walk(lhs, bound, used);
+            walk(rhs, bound, used);
+        }
+        HExprKind::Assign { target, value } => {
+            walk(target, bound, used);
+            walk(value, bound, used);
+        }
+        HExprKind::Call { callee, args } => {
+            walk(callee, bound, used);
+            args.iter().for_each(|a| walk(a, bound, used));
+        }
+        HExprKind::MethodCall { recv, args, .. } => {
+            walk(recv, bound, used);
+            args.iter().for_each(|a| walk(a, bound, used));
+        }
+        HExprKind::Index { recv, index } => {
+            walk(recv, bound, used);
+            walk(index, bound, used);
+        }
+        HExprKind::Tuple(xs) | HExprKind::List(xs) | HExprKind::Set(xs) => {
+            xs.iter().for_each(|x| walk(x, bound, used))
+        }
+        HExprKind::ListRepeat { value, count } => {
+            walk(value, bound, used);
+            walk(count, bound, used);
+        }
+        HExprKind::Map(pairs) => {
+            for (k, v) in pairs {
+                walk(k, bound, used);
+                walk(v, bound, used);
+            }
+        }
+        HExprKind::StructLit { fields, spread, .. } => {
+            for (_, v) in fields {
+                walk(v, bound, used);
+            }
+            if let Some(s) = spread {
+                walk(s, bound, used);
+            }
+        }
+        HExprKind::Block(b) => walk_block(b, bound, used),
+        HExprKind::If { cond, then, els } => {
+            walk(cond, bound, used);
+            walk_block(then, bound, used);
+            if let Some(e) = els {
+                walk(e, bound, used);
+            }
+        }
+        HExprKind::Match { scrutinee, arms } => {
+            walk(scrutinee, bound, used);
+            for arm in arms {
+                walk_pattern(&arm.pattern, bound);
+                if let Some(g) = &arm.guard {
+                    walk(g, bound, used);
+                }
+                walk(&arm.body, bound, used);
+            }
+        }
+        HExprKind::Loop { body } | HExprKind::Spawn(body) | HExprKind::Unsafe(body) => {
+            walk_block(body, bound, used)
+        }
+        HExprKind::While { cond, body } => {
+            walk(cond, bound, used);
+            walk_block(body, bound, used);
+        }
+        HExprKind::For {
+            pattern,
+            iter,
+            body,
+        } => {
+            walk_pattern(pattern, bound);
+            walk(iter, bound, used);
+            walk_block(body, bound, used);
+        }
+        HExprKind::Range { start, end, .. } => {
+            walk(start, bound, used);
+            walk(end, bound, used);
+        }
+        HExprKind::Closure {
+            params, body, ..
+        } => {
+            // A nested closure's params are bound; its body's uses of *our* locals
+            // are still our captures, so descend into it.
+            for p in params {
+                bound.insert(p.binding);
+            }
+            walk(body, bound, used);
+        }
+        HExprKind::TryCatch {
+            body,
+            catches,
+            finally,
+        } => {
+            walk_block(body, bound, used);
+            for c in catches {
+                if let Some(b) = c.binding {
+                    bound.insert(b);
+                }
+                walk_block(&c.body, bound, used);
+            }
+            if let Some(f) = finally {
+                walk_block(f, bound, used);
+            }
+        }
+    }
+}
+
+fn walk_block(b: &HBlock, bound: &mut HashSet<BindingId>, used: &mut Vec<(BindingId, Ty)>) {
+    for s in &b.stmts {
+        match s {
+            HStmt::Let { pattern, value, .. } => {
+                walk_pattern(pattern, bound);
+                walk(value, bound, used);
+            }
+            HStmt::Expr(e) => walk(e, bound, used),
+            HStmt::Return(Some(e), _) | HStmt::Break(Some(e), _) => walk(e, bound, used),
+            HStmt::Return(None, _) | HStmt::Break(None, _) | HStmt::Continue(_) => {}
+            // A nested `fn`/`const` is its own scope; it does not capture and its
+            // body's references are resolved independently.
+            HStmt::Fn(_) | HStmt::Const(_) => {}
+        }
+    }
+    if let Some(t) = &b.tail {
+        walk(t, bound, used);
+    }
+}
+
+fn walk_pattern(p: &HPattern, bound: &mut HashSet<BindingId>) {
+    match p {
+        HPattern::Binding(b) | HPattern::Typed { binding: b, .. } => {
+            bound.insert(*b);
+        }
+        HPattern::At(b, sub) => {
+            bound.insert(*b);
+            walk_pattern(sub, bound);
+        }
+        HPattern::Tuple(ps) | HPattern::Or(ps) | HPattern::Variant { args: ps, .. } => {
+            ps.iter().for_each(|p| walk_pattern(p, bound))
+        }
+        HPattern::List { items, rest } => {
+            items.iter().for_each(|p| walk_pattern(p, bound));
+            if let Some(r) = rest {
+                bound.insert(*r);
+            }
+        }
+        HPattern::Struct { fields, .. } => {
+            for (_, b) in fields {
+                bound.insert(*b);
+            }
+        }
+        HPattern::Wildcard
+        | HPattern::Int(_)
+        | HPattern::Str(_)
+        | HPattern::Bool(_)
+        | HPattern::Char(_)
+        | HPattern::Nil
+        | HPattern::Range { .. } => {}
     }
 }
 
@@ -1532,12 +1771,28 @@ impl Printer {
                 self.expr(indent, start);
                 self.expr(indent, end);
             }
-            HExprKind::Closure { params, body, .. } => {
+            HExprKind::Closure {
+                params,
+                captures,
+                body,
+                ..
+            } => {
                 let ps: Vec<String> = params
                     .iter()
                     .map(|pa| format!("{}#{}", pa.name, pa.binding.0))
                     .collect();
                 self.line(indent, &format!("params({})", ps.join(", ")));
+                let caps: Vec<String> = captures
+                    .iter()
+                    .map(|c| {
+                        let m = match c.mode {
+                            CaptureMode::Ref => "&",
+                            CaptureMode::Value => "move",
+                        };
+                        format!("{} #{}: {}", m, c.binding.0, display_ty(&c.ty))
+                    })
+                    .collect();
+                self.line(indent, &format!("captures({})", caps.join(", ")));
                 self.expr(indent, body);
             }
             HExprKind::Await(inner) => self.expr(indent, inner),
