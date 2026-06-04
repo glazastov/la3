@@ -16,6 +16,7 @@ mod diag;
 mod hir;
 mod interp;
 mod lexer;
+mod mir;
 mod parser;
 mod ty;
 mod typeck;
