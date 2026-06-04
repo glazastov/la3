@@ -11,12 +11,20 @@
 //!   records that same id. Names and shadowing were resolved once, in Phase 2.2;
 //!   HIR and everything after it work on ids alone.
 //!
-//! Subpart **2.3** (this) defines the HIR and a faithful, near-1:1 lowering from
-//! the AST. The *desugarings* listed in 2.4 (f-strings → `format`, `?.`/`??` →
-//! `match`, `if let`/`while let` → `match`, `+=` → `x = x + e`, `e?` → early
-//! return) are deliberately left for that subpart, so the sugar-carrying variants
-//! below (`FStr`, `Coalesce`, compound [`HExprKind::Assign`], `WhileLet`, the
-//! `optional` flags, `Try`) still exist and are lowered structurally for now.
+//! Subpart 2.3 defined the HIR and a near-1:1 lowering. Subpart **2.4** (this)
+//! removes the surface sugar during lowering, so HIR has **no sugar**:
+//!
+//! * f-strings → `+`-concatenation of `Str` literals and [`HExprKind::Format`].
+//! * `a ?? b` and `a?.x` → a `match` on `nil`.
+//! * `e?` → a `match` that unwraps and early-returns (`Result`/`Option`).
+//! * compound `x += e` → plain `x = x + e`.
+//! * `while let P = e { … }` → `loop { match e { P => …, _ => break } }`.
+//!
+//! (`if let` is not in the surface grammar — the parser only accepts `while let`
+//! — so there is nothing to desugar for it.) The desugarings introduce fresh
+//! *synthetic* binding ids (see [`Lower::fresh`]) for their temporaries. The
+//! typed `for` loop is kept as an HIR node; its per-iterable step is lowered in
+//! MIR.
 
 #![allow(dead_code)]
 
@@ -123,8 +131,14 @@ pub(crate) enum HExprKind {
     Char(char),
     Bool(bool),
     Nil,
-    /// f-string parts (desugared to `format` in 2.4).
-    FStr(Vec<HFStrPart>),
+    /// The format primitive: render one value to `str`, with an optional format
+    /// spec (`:02x`, `:.1f`, `:>20`). f-strings desugar to a `+`-concatenation of
+    /// `Str` literals and `Format` nodes (Phase 2.4); the spec is honoured by the
+    /// runtime in Phase 4.3.
+    Format {
+        value: Box<HExpr>,
+        spec: Option<String>,
+    },
     /// A use of a local binding, resolved to its unique id.
     Local(BindingId),
     /// A use of a global name (function, const, type, enum variant, builtin).
@@ -141,15 +155,10 @@ pub(crate) enum HExprKind {
         lhs: Box<HExpr>,
         rhs: Box<HExpr>,
     },
-    /// `a ?? b` (desugared in 2.4).
-    Coalesce {
-        lhs: Box<HExpr>,
-        rhs: Box<HExpr>,
-    },
+    /// Plain assignment. Compound `+=`/`-=`/… are desugared to `x = x <op> e`
+    /// (Phase 2.4), so HIR only ever sees `=`.
     Assign {
         target: Box<HExpr>,
-        /// `None` = plain `=`; `Some` = compound (`+=`, …), desugared in 2.4.
-        op: Option<BinOp>,
         value: Box<HExpr>,
     },
     Cast {
@@ -162,14 +171,11 @@ pub(crate) enum HExprKind {
     },
     MethodCall {
         recv: Box<HExpr>,
-        /// `?.` short-circuit (desugared in 2.4).
-        optional: bool,
         method: String,
         args: Vec<HExpr>,
     },
     Field {
         recv: Box<HExpr>,
-        optional: bool,
         name: String,
     },
     Index {
@@ -206,11 +212,6 @@ pub(crate) enum HExprKind {
         cond: Box<HExpr>,
         body: HBlock,
     },
-    WhileLet {
-        pattern: HPattern,
-        expr: Box<HExpr>,
-        body: HBlock,
-    },
     For {
         pattern: HPattern,
         iter: Box<HExpr>,
@@ -226,7 +227,6 @@ pub(crate) enum HExprKind {
         body: Box<HExpr>,
         is_move: bool,
     },
-    Try(Box<HExpr>),
     Await(Box<HExpr>),
     Spawn(HBlock),
     Unsafe(HBlock),
@@ -234,14 +234,6 @@ pub(crate) enum HExprKind {
         body: HBlock,
         catches: Vec<HCatchArm>,
         finally: Option<HBlock>,
-    },
-}
-
-pub(crate) enum HFStrPart {
-    Lit(String),
-    Expr {
-        expr: Box<HExpr>,
-        spec: Option<String>,
     },
 }
 
@@ -317,6 +309,11 @@ struct Lower<'a> {
     /// counter reproduces the same ids. The `debug_assert` in [`Self::declare`]
     /// catches any drift between the two walks.
     next_def: u32,
+    /// The next *synthetic* binding id, for desugaring temporaries (the bound
+    /// value in a `??`/`?.`/`?` match). Starts past every real binding so it
+    /// never collides; these ids do not go through [`Self::declare`] (there is no
+    /// source name to assert against).
+    next_synth: u32,
     /// Generic parameter names of the item currently being lowered (so the type
     /// resolver renders `T` as [`Ty::Param`] rather than a nominal type).
     generics: HashSet<String>,
@@ -329,8 +326,38 @@ impl<'a> Lower<'a> {
             res,
             tyres: TyResolver::collect(prog),
             next_def: 0,
+            next_synth: res.binding_count(),
             generics: HashSet::new(),
         }
+    }
+
+    /// Allocate a fresh synthetic binding id for a desugaring temporary.
+    fn fresh(&mut self) -> BindingId {
+        let id = BindingId(self.next_synth);
+        self.next_synth += 1;
+        id
+    }
+
+    // -- small HIR constructors, to keep the desugarings readable --
+
+    fn mk(&self, kind: HExprKind, ty: Ty, pos: Pos) -> HExpr {
+        HExpr { kind, ty, pos }
+    }
+    fn mk_nil(&self, pos: Pos) -> HExpr {
+        self.mk(HExprKind::Nil, Ty::Nil, pos)
+    }
+    fn mk_local(&self, b: BindingId, ty: Ty, pos: Pos) -> HExpr {
+        self.mk(HExprKind::Local(b), ty, pos)
+    }
+    /// A block that is just a `break` (the catch-all arm of a desugared `while
+    /// let`). Its type is `Never` — it diverges.
+    fn mk_break_block(&self, pos: Pos) -> HExpr {
+        let block = HBlock {
+            stmts: vec![HStmt::Break(None, pos)],
+            tail: None,
+            pos,
+        };
+        self.mk(HExprKind::Block(block), Ty::Never, pos)
     }
 
     /// Allocate the next binding id, mirroring name resolution's allocation
@@ -552,6 +579,37 @@ impl<'a> Lower<'a> {
     }
 
     fn lower_expr(&mut self, e: &Expr) -> HExpr {
+        // The Phase 2.4 desugarings produce a whole replacement subtree, so they
+        // are handled here (each returns a full `HExpr`); everything else lowers
+        // 1:1 via `lower_kind`.
+        match &e.kind {
+            ExprKind::FStr(parts) => return self.desugar_fstring(parts, e.pos),
+            ExprKind::Coalesce { lhs, rhs } => return self.desugar_coalesce(e, lhs, rhs),
+            ExprKind::Try(inner) => return self.desugar_try(e, inner),
+            ExprKind::WhileLet {
+                pattern,
+                expr,
+                body,
+            } => return self.desugar_while_let(e, pattern, expr, body),
+            ExprKind::Assign {
+                target,
+                op: Some(op),
+                value,
+            } => return self.desugar_compound(e, target, *op, value),
+            ExprKind::MethodCall {
+                recv,
+                optional: true,
+                method,
+                args,
+                ..
+            } => return self.desugar_optional_method(e, recv, method, args),
+            ExprKind::Field {
+                recv,
+                optional: true,
+                name,
+            } => return self.desugar_optional_field(e, recv, name),
+            _ => {}
+        }
         let ty = self.ty_of(e);
         let kind = self.lower_kind(e);
         HExpr {
@@ -578,18 +636,13 @@ impl<'a> Lower<'a> {
                 Some(b) => HExprKind::Local(b),
                 None => HExprKind::Global("self".to_string()),
             },
-            ExprKind::FStr(parts) => HExprKind::FStr(
-                parts
-                    .iter()
-                    .map(|p| match p {
-                        FStrPart::Lit(s) => HFStrPart::Lit(s.clone()),
-                        FStrPart::Expr { expr, spec } => HFStrPart::Expr {
-                            expr: Box::new(self.lower_expr(expr)),
-                            spec: spec.clone(),
-                        },
-                    })
-                    .collect(),
-            ),
+            // Desugared in `lower_expr` before reaching here.
+            ExprKind::FStr(_)
+            | ExprKind::Coalesce { .. }
+            | ExprKind::Try(_)
+            | ExprKind::WhileLet { .. } => {
+                unreachable!("sugar is desugared in lower_expr")
+            }
             ExprKind::Unary { op, expr } => HExprKind::Unary {
                 op: *op,
                 expr: Box::new(self.lower_expr(expr)),
@@ -599,13 +652,9 @@ impl<'a> Lower<'a> {
                 lhs: Box::new(self.lower_expr(lhs)),
                 rhs: Box::new(self.lower_expr(rhs)),
             },
-            ExprKind::Coalesce { lhs, rhs } => HExprKind::Coalesce {
-                lhs: Box::new(self.lower_expr(lhs)),
-                rhs: Box::new(self.lower_expr(rhs)),
-            },
-            ExprKind::Assign { target, op, value } => HExprKind::Assign {
+            // Compound `+=` is desugared in `lower_expr`; only plain `=` reaches here.
+            ExprKind::Assign { target, value, .. } => HExprKind::Assign {
                 target: Box::new(self.lower_expr(target)),
-                op: *op,
                 value: Box::new(self.lower_expr(value)),
             },
             ExprKind::Cast { expr, .. } => HExprKind::Cast {
@@ -617,25 +666,16 @@ impl<'a> Lower<'a> {
                 callee: Box::new(self.lower_expr(callee)),
                 args: args.iter().map(|a| self.lower_expr(a)).collect(),
             },
+            // `?.` is desugared in `lower_expr`; only plain calls/fields reach here.
             ExprKind::MethodCall {
-                recv,
-                optional,
-                method,
-                args,
-                ..
+                recv, method, args, ..
             } => HExprKind::MethodCall {
                 recv: Box::new(self.lower_expr(recv)),
-                optional: *optional,
                 method: method.clone(),
                 args: args.iter().map(|a| self.lower_expr(a)).collect(),
             },
-            ExprKind::Field {
-                recv,
-                optional,
-                name,
-            } => HExprKind::Field {
+            ExprKind::Field { recv, name, .. } => HExprKind::Field {
                 recv: Box::new(self.lower_expr(recv)),
-                optional: *optional,
                 name: name.clone(),
             },
             ExprKind::Index { recv, index } => HExprKind::Index {
@@ -697,19 +737,6 @@ impl<'a> Lower<'a> {
                 cond: Box::new(self.lower_expr(cond)),
                 body: self.lower_block(body),
             },
-            ExprKind::WhileLet {
-                pattern,
-                expr,
-                body,
-            } => {
-                let expr = Box::new(self.lower_expr(expr));
-                let pattern = self.lower_pattern(pattern);
-                HExprKind::WhileLet {
-                    pattern,
-                    expr,
-                    body: self.lower_block(body),
-                }
-            }
             ExprKind::For {
                 pattern,
                 iter,
@@ -759,7 +786,6 @@ impl<'a> Lower<'a> {
                     is_move: *is_move,
                 }
             }
-            ExprKind::Try(e) => HExprKind::Try(Box::new(self.lower_expr(e))),
             ExprKind::Await(e) => HExprKind::Await(Box::new(self.lower_expr(e))),
             ExprKind::Spawn(b) => HExprKind::Spawn(self.lower_block(b)),
             ExprKind::Unsafe(b) => HExprKind::Unsafe(self.lower_block(b)),
@@ -832,6 +858,302 @@ impl<'a> Lower<'a> {
                 }
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 2.4 desugarings (each returns a full replacement `HExpr`)
+    // -----------------------------------------------------------------------
+
+    /// `f"a={x:spec}"` → a `+`-fold of `Str` literals and `Format` primitives.
+    /// A literal-only or empty f-string collapses to a single `Str`.
+    fn desugar_fstring(&mut self, parts: &[FStrPart], pos: Pos) -> HExpr {
+        let mut segs: Vec<HExpr> = Vec::new();
+        for part in parts {
+            match part {
+                FStrPart::Lit(s) => segs.push(self.mk(HExprKind::Str(s.clone()), Ty::Str, pos)),
+                FStrPart::Expr { expr, spec } => {
+                    let value = Box::new(self.lower_expr(expr));
+                    segs.push(self.mk(
+                        HExprKind::Format {
+                            value,
+                            spec: spec.clone(),
+                        },
+                        Ty::Str,
+                        pos,
+                    ));
+                }
+            }
+        }
+        let mut iter = segs.into_iter();
+        let mut acc = iter
+            .next()
+            .unwrap_or_else(|| self.mk(HExprKind::Str(String::new()), Ty::Str, pos));
+        for seg in iter {
+            acc = self.mk(
+                HExprKind::Binary {
+                    op: BinOp::Add,
+                    lhs: Box::new(acc),
+                    rhs: Box::new(seg),
+                },
+                Ty::Str,
+                pos,
+            );
+        }
+        acc
+    }
+
+    /// `a ?? b` → `match a { nil => b, t => t }` (`t` fresh). Mirrors the
+    /// interpreter: the left value when non-`nil`, else the right (short-circuit).
+    fn desugar_coalesce(&mut self, e: &Expr, lhs: &Expr, rhs: &Expr) -> HExpr {
+        let node_ty = self.ty_of(e);
+        let scrut = self.lower_expr(lhs);
+        let lty = scrut.ty.clone();
+        let rhs = self.lower_expr(rhs);
+        let t = self.fresh();
+        let arms = vec![
+            HMatchArm {
+                pattern: HPattern::Nil,
+                guard: None,
+                body: rhs,
+            },
+            HMatchArm {
+                pattern: HPattern::Binding(t),
+                guard: None,
+                body: self.mk_local(t, lty, e.pos),
+            },
+        ];
+        self.mk(
+            HExprKind::Match {
+                scrutinee: Box::new(scrut),
+                arms,
+            },
+            node_ty,
+            e.pos,
+        )
+    }
+
+    /// `a?.name` → `match a { nil => nil, t => t.name }` (`t` fresh).
+    fn desugar_optional_field(&mut self, e: &Expr, recv: &Expr, name: &str) -> HExpr {
+        let node_ty = self.ty_of(e); // `T | nil`
+        let scrut = self.lower_expr(recv);
+        let rty = scrut.ty.clone();
+        let t = self.fresh();
+        let access = self.mk(
+            HExprKind::Field {
+                recv: Box::new(self.mk_local(t, rty, e.pos)),
+                name: name.to_string(),
+            },
+            node_ty.strip_nil(),
+            e.pos,
+        );
+        self.mk_optional_match(scrut, t, access, node_ty, e.pos)
+    }
+
+    /// `a?.m(args)` → `match a { nil => nil, t => t.m(args) }` (`t` fresh). The
+    /// args sit in the non-`nil` arm, so they are evaluated only when reached.
+    fn desugar_optional_method(
+        &mut self,
+        e: &Expr,
+        recv: &Expr,
+        method: &str,
+        args: &[Expr],
+    ) -> HExpr {
+        let node_ty = self.ty_of(e);
+        let scrut = self.lower_expr(recv);
+        let rty = scrut.ty.clone();
+        let t = self.fresh();
+        let largs = args.iter().map(|a| self.lower_expr(a)).collect();
+        let access = self.mk(
+            HExprKind::MethodCall {
+                recv: Box::new(self.mk_local(t, rty, e.pos)),
+                method: method.to_string(),
+                args: largs,
+            },
+            node_ty.strip_nil(),
+            e.pos,
+        );
+        self.mk_optional_match(scrut, t, access, node_ty, e.pos)
+    }
+
+    /// Shared shape for `?.`: `match scrut { nil => nil, t => access }`.
+    fn mk_optional_match(
+        &mut self,
+        scrut: HExpr,
+        t: BindingId,
+        access: HExpr,
+        node_ty: Ty,
+        pos: Pos,
+    ) -> HExpr {
+        let arms = vec![
+            HMatchArm {
+                pattern: HPattern::Nil,
+                guard: None,
+                body: self.mk_nil(pos),
+            },
+            HMatchArm {
+                pattern: HPattern::Binding(t),
+                guard: None,
+                body: access,
+            },
+        ];
+        self.mk(
+            HExprKind::Match {
+                scrutinee: Box::new(scrut),
+                arms,
+            },
+            node_ty,
+            pos,
+        )
+    }
+
+    /// `x op= e` → `x = x op e`. Per the plan the place is re-evaluated, which
+    /// double-evaluates a non-trivial place's sub-expressions (e.g. the index in
+    /// `a[i] += 1`); assignment targets are simple lvalues, and the precise
+    /// "evaluate the place once" semantics is a MIR concern (explicit places).
+    fn desugar_compound(&mut self, e: &Expr, target: &Expr, op: BinOp, value: &Expr) -> HExpr {
+        let lhs_place = self.lower_expr(target);
+        let lhs_operand = self.lower_expr(target);
+        let operand_ty = lhs_operand.ty.clone();
+        let rhs = self.lower_expr(value);
+        let combined = self.mk(
+            HExprKind::Binary {
+                op,
+                lhs: Box::new(lhs_operand),
+                rhs: Box::new(rhs),
+            },
+            operand_ty,
+            e.pos,
+        );
+        self.mk(
+            HExprKind::Assign {
+                target: Box::new(lhs_place),
+                value: Box::new(combined),
+            },
+            self.ty_of(e),
+            e.pos,
+        )
+    }
+
+    /// `e?` → a `match` that unwraps and early-returns, picked by `e`'s type:
+    /// `Result` → `{ Ok(v) => v, Err(x) => return Err(x) }`; otherwise (Option /
+    /// bare optional) → `{ Some(v) => v, None => return nil }`. The `nil` early
+    /// return matches the interpreter oracle (it returns `nil`, not `None`).
+    fn desugar_try(&mut self, e: &Expr, inner: &Expr) -> HExpr {
+        let node_ty = self.ty_of(e); // the unwrapped payload type
+        let scrut = self.lower_expr(inner);
+        let inner_ty = scrut.ty.clone();
+        let is_result = matches!(&inner_ty, Ty::Enum(n, _) if n == "Result");
+        let v = self.fresh();
+        let arms = if is_result {
+            let x = self.fresh();
+            let err_call = self.mk(
+                HExprKind::Call {
+                    callee: Box::new(self.mk(HExprKind::Global("Err".into()), Ty::Unknown, e.pos)),
+                    args: vec![self.mk_local(x, Ty::Unknown, e.pos)],
+                },
+                inner_ty.clone(),
+                e.pos,
+            );
+            let err_body = self.mk_return_block(err_call, e.pos);
+            vec![
+                HMatchArm {
+                    pattern: HPattern::Variant {
+                        path: vec!["Ok".into()],
+                        args: vec![HPattern::Binding(v)],
+                    },
+                    guard: None,
+                    body: self.mk_local(v, node_ty.clone(), e.pos),
+                },
+                HMatchArm {
+                    pattern: HPattern::Variant {
+                        path: vec!["Err".into()],
+                        args: vec![HPattern::Binding(x)],
+                    },
+                    guard: None,
+                    body: err_body,
+                },
+            ]
+        } else {
+            let none_ret = self.mk_nil(e.pos);
+            let none_body = self.mk_return_block(none_ret, e.pos);
+            vec![
+                HMatchArm {
+                    pattern: HPattern::Variant {
+                        path: vec!["Some".into()],
+                        args: vec![HPattern::Binding(v)],
+                    },
+                    guard: None,
+                    body: self.mk_local(v, node_ty.clone(), e.pos),
+                },
+                HMatchArm {
+                    pattern: HPattern::Variant {
+                        path: vec!["None".into()],
+                        args: vec![],
+                    },
+                    guard: None,
+                    body: none_body,
+                },
+            ]
+        };
+        self.mk(
+            HExprKind::Match {
+                scrutinee: Box::new(scrut),
+                arms,
+            },
+            node_ty,
+            e.pos,
+        )
+    }
+
+    /// `while let P = e { body }` → `loop { match e { P => body, _ => break } }`.
+    fn desugar_while_let(
+        &mut self,
+        e: &Expr,
+        pattern: &Pattern,
+        expr: &Expr,
+        body: &Block,
+    ) -> HExpr {
+        // Mirror resolution order: scrutinee, then bind the pattern, then body.
+        let scrut = self.lower_expr(expr);
+        let pat = self.lower_pattern(pattern);
+        let body_block = self.lower_block(body);
+        let body_expr = self.mk(HExprKind::Block(body_block), Ty::Unit, e.pos);
+        let arms = vec![
+            HMatchArm {
+                pattern: pat,
+                guard: None,
+                body: body_expr,
+            },
+            HMatchArm {
+                pattern: HPattern::Wildcard,
+                guard: None,
+                body: self.mk_break_block(e.pos),
+            },
+        ];
+        let match_expr = self.mk(
+            HExprKind::Match {
+                scrutinee: Box::new(scrut),
+                arms,
+            },
+            Ty::Unit,
+            e.pos,
+        );
+        let loop_block = HBlock {
+            stmts: Vec::new(),
+            tail: Some(Box::new(match_expr)),
+            pos: e.pos,
+        };
+        self.mk(HExprKind::Loop { body: loop_block }, self.ty_of(e), e.pos)
+    }
+
+    /// A block whose only statement is `return <val>`; type `Never`.
+    fn mk_return_block(&self, val: HExpr, pos: Pos) -> HExpr {
+        let block = HBlock {
+            stmts: vec![HStmt::Return(Some(val), pos)],
+            tail: None,
+            pos,
+        };
+        self.mk(HExprKind::Block(block), Ty::Never, pos)
     }
 }
 
@@ -1079,16 +1401,15 @@ impl Printer {
             HExprKind::Path(p) => format!("Path({})", p.join("::")),
             HExprKind::Unary { op, .. } => format!("Unary({:?})", op),
             HExprKind::Binary { op, .. } => format!("Binary({:?})", op),
-            HExprKind::Coalesce { .. } => "Coalesce".to_string(),
-            HExprKind::Assign { op, .. } => format!("Assign({:?})", op),
+            HExprKind::Format { spec, .. } => match spec {
+                Some(s) => format!("Format(:{})", s),
+                None => "Format".to_string(),
+            },
+            HExprKind::Assign { .. } => "Assign".to_string(),
             HExprKind::Cast { ty, .. } => format!("Cast({})", display_ty(ty)),
             HExprKind::Call { .. } => "Call".to_string(),
-            HExprKind::MethodCall {
-                method, optional, ..
-            } => format!("MethodCall({}{})", if *optional { "?." } else { "" }, method),
-            HExprKind::Field { name, optional, .. } => {
-                format!("Field({}{})", if *optional { "?." } else { "" }, name)
-            }
+            HExprKind::MethodCall { method, .. } => format!("MethodCall({})", method),
+            HExprKind::Field { name, .. } => format!("Field({})", name),
             HExprKind::Index { .. } => "Index".to_string(),
             HExprKind::Tuple(_) => "Tuple".to_string(),
             HExprKind::List(_) => "List".to_string(),
@@ -1101,14 +1422,11 @@ impl Printer {
             HExprKind::Match { .. } => "Match".to_string(),
             HExprKind::Loop { .. } => "Loop".to_string(),
             HExprKind::While { .. } => "While".to_string(),
-            HExprKind::WhileLet { .. } => "WhileLet".to_string(),
             HExprKind::For { .. } => "For".to_string(),
             HExprKind::Range { inclusive, .. } => {
                 format!("Range(inclusive={})", inclusive)
             }
             HExprKind::Closure { is_move, .. } => format!("Closure(move={})", is_move),
-            HExprKind::FStr(_) => "FStr".to_string(),
-            HExprKind::Try(_) => "Try".to_string(),
             HExprKind::Await(_) => "Await".to_string(),
             HExprKind::Spawn(_) => "Spawn".to_string(),
             HExprKind::Unsafe(_) => "Unsafe".to_string(),
@@ -1120,8 +1438,10 @@ impl Printer {
 
     fn children(&mut self, indent: usize, e: &HExpr) {
         match &e.kind {
-            HExprKind::Unary { expr, .. } | HExprKind::Cast { expr, .. } => self.expr(indent, expr),
-            HExprKind::Binary { lhs, rhs, .. } | HExprKind::Coalesce { lhs, rhs } => {
+            HExprKind::Unary { expr, .. }
+            | HExprKind::Cast { expr, .. }
+            | HExprKind::Format { value: expr, .. } => self.expr(indent, expr),
+            HExprKind::Binary { lhs, rhs, .. } => {
                 self.expr(indent, lhs);
                 self.expr(indent, rhs);
             }
@@ -1199,15 +1519,6 @@ impl Printer {
                 self.expr(indent, cond);
                 self.block(indent, body);
             }
-            HExprKind::WhileLet {
-                pattern,
-                expr,
-                body,
-            } => {
-                self.line(indent, &format!("let {}", pat_str(pattern)));
-                self.expr(indent, expr);
-                self.block(indent, body);
-            }
             HExprKind::For {
                 pattern,
                 iter,
@@ -1229,20 +1540,7 @@ impl Printer {
                 self.line(indent, &format!("params({})", ps.join(", ")));
                 self.expr(indent, body);
             }
-            HExprKind::FStr(parts) => {
-                for part in parts {
-                    match part {
-                        HFStrPart::Lit(s) => self.line(indent, &format!("lit {:?}", s)),
-                        HFStrPart::Expr { expr, spec } => {
-                            if let Some(spec) = spec {
-                                self.line(indent, &format!("spec {:?}", spec));
-                            }
-                            self.expr(indent, expr);
-                        }
-                    }
-                }
-            }
-            HExprKind::Try(inner) | HExprKind::Await(inner) => self.expr(indent, inner),
+            HExprKind::Await(inner) => self.expr(indent, inner),
             HExprKind::TryCatch {
                 body,
                 catches,

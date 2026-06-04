@@ -115,10 +115,92 @@ fn match_arms_bind_and_resolve() {
     assert!(dump.contains("arm Some(#"), "variant pattern binds:\n{}", dump);
 }
 
+// ---------------------------------------------------------------------------
+// Phase 2.4 — desugarings (HIR carries no surface sugar)
+// ---------------------------------------------------------------------------
+
 #[test]
-fn fstring_is_retained_as_sugar_for_2_4() {
-    // 2.3 lowers structurally: the f-string is kept (desugaring is 2.4).
+fn fstring_desugars_to_format_and_concat() {
+    // `f"n = {n}"` → `"n = " + format(n)`; no `FStr` survives.
     let dump = hir("fn main() { let n = 7; io.println(f\"n = {n}\") }");
-    assert!(dump.contains("FStr : str"), "{}", dump);
-    assert!(dump.contains("lit \"n = \""), "{}", dump);
+    assert!(!dump.contains("FStr"), "f-string should be gone:\n{}", dump);
+    assert!(dump.contains("Binary(Add) : str"), "concat:\n{}", dump);
+    assert!(dump.contains("Format : str"), "format primitive:\n{}", dump);
+    assert!(dump.contains("Str(\"n = \")"), "literal segment:\n{}", dump);
+}
+
+#[test]
+fn fstring_with_spec_keeps_the_spec_on_format() {
+    let dump = hir("fn main() { let x = 5; io.println(f\"{x:>3}\") }");
+    assert!(dump.contains("Format(:>3)"), "spec retained:\n{}", dump);
+}
+
+#[test]
+fn coalesce_desugars_to_a_nil_match() {
+    // `a ?? b` → `match a { nil => b, t => t }`; no `Coalesce` survives.
+    let dump = hir("fn main() { let a = nil; let b = a ?? \"x\"; io.println(b) }");
+    assert!(!dump.contains("Coalesce"), "?? should be gone:\n{}", dump);
+    assert!(dump.contains("Match :"), "{}", dump);
+    assert!(dump.contains("arm nil"), "nil arm:\n{}", dump);
+    assert!(dump.contains("Str(\"x\")"), "fallback in nil arm:\n{}", dump);
+}
+
+#[test]
+fn optional_chain_desugars_to_a_nil_match() {
+    // `u?.name` → `match u { nil => nil, t => t.name }`.
+    let src = "struct U { name: str }\n\
+               fn f(u: U | nil) -> str | nil { u?.name }\n\
+               fn main() {}";
+    let dump = hir(src);
+    assert!(dump.contains("arm nil"), "nil arm:\n{}", dump);
+    assert!(dump.contains("Field(name)"), "plain field in non-nil arm:\n{}", dump);
+    // No `?.` marker remains anywhere.
+    assert!(!dump.contains("?."), "optional marker gone:\n{}", dump);
+}
+
+#[test]
+fn try_on_result_desugars_to_ok_err_match_with_return() {
+    // `e?` on a Result → `match e { Ok(v) => v, Err(x) => return Err(x) }`.
+    let src = "fn run() -> Result<str> { let t = fs.read(\"p\")?; Ok(t) }\nfn main() {}";
+    let dump = hir(src);
+    assert!(dump.contains("arm Ok(#"), "Ok arm binds:\n{}", dump);
+    assert!(dump.contains("arm Err(#"), "Err arm binds:\n{}", dump);
+    assert!(dump.contains("Global(Err)"), "reconstructs Err:\n{}", dump);
+    // The Err arm early-returns.
+    assert!(dump.contains("return"), "early return:\n{}", dump);
+}
+
+#[test]
+fn compound_assign_desugars_to_plain_assign_plus_binary() {
+    // `n += 5` → `n = n + 5`.
+    let dump = hir("fn main() { let mut n = 0; n += 5 }");
+    assert!(dump.contains("Assign :"), "{}", dump);
+    assert!(dump.contains("Binary(Add) : i32"), "rebuilt operation:\n{}", dump);
+    // The target appears on both sides (place and operand).
+    let locals = dump.matches("Local(#0)").count();
+    assert!(locals >= 2, "target used as place and operand:\n{}", dump);
+}
+
+#[test]
+fn while_let_desugars_to_loop_match_break() {
+    // `while let Some(x) = e { … }` → `loop { match e { Some(x) => …, _ => break } }`.
+    let dump = hir("fn main() { let mut xs = [1,2,3]; while let Some(x) = xs.pop() { io.println(x) } }");
+    assert!(!dump.contains("WhileLet"), "while-let should be gone:\n{}", dump);
+    assert!(dump.contains("Loop :"), "{}", dump);
+    assert!(dump.contains("arm Some(#"), "match arm binds:\n{}", dump);
+    assert!(dump.contains("arm _"), "wildcard arm:\n{}", dump);
+    assert!(dump.contains("break"), "break in wildcard arm:\n{}", dump);
+}
+
+#[test]
+fn desugaring_temporaries_get_fresh_ids_past_real_bindings() {
+    // `a` is the only real binding (#0); the `??` temporary must not reuse it.
+    let dump = hir("fn main() { let a = nil; let b = a ?? \"x\"; io.println(b) }");
+    // The synthetic binding in the catch-all arm has an id >= the real count.
+    // Real bindings here: a(#0), b(#1). The temp should be #2 or higher.
+    assert!(
+        dump.contains("arm #2") || dump.contains("arm #3"),
+        "fresh synthetic id past reals:\n{}",
+        dump
+    );
 }

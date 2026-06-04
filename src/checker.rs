@@ -47,6 +47,14 @@ impl Resolutions {
         &self.bindings[b.0 as usize]
     }
 
+    /// How many binding ids were allocated. HIR desugaring (Phase 2.4) needs
+    /// fresh ids for the temporaries it introduces (`??`/`?.`/`?` matches); it
+    /// starts them at this count so they never collide with a real binding.
+    #[allow(dead_code)]
+    pub fn binding_count(&self) -> u32 {
+        self.bindings.len() as u32
+    }
+
     /// Debug view for the `la3 resolve` command: every binding, then every use
     /// resolved to its binding (sorted by position).
     pub fn dump(&self) -> String {
