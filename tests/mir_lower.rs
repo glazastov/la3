@@ -350,10 +350,22 @@ fn closure_with_a_by_ref_capture_lifts_and_borrows() {
     assert!(dump.contains("fn f::{closure#0}"), "lifted fn:\n{}", dump);
     assert!(dump.contains("// env"), "env parameter:\n{}", dump);
     // The site takes a reference and builds the closure value.
-    assert!(dump.contains("= &_2"), "by-ref capture takes a borrow:\n{}", dump);
-    assert!(dump.contains("closure f::{closure#0}("), "closure value:\n{}", dump);
+    assert!(
+        dump.contains("= &_2"),
+        "by-ref capture takes a borrow:\n{}",
+        dump
+    );
+    assert!(
+        dump.contains("closure f::{closure#0}("),
+        "closure value:\n{}",
+        dump
+    );
     // The capture is read through the env via a deref.
-    assert!(dump.contains("(*_1.0)"), "capture read through env:\n{}", dump);
+    assert!(
+        dump.contains("(*_1.0)"),
+        "capture read through env:\n{}",
+        dump
+    );
 }
 
 #[test]
@@ -368,7 +380,11 @@ fn move_closure_captures_by_value() {
     assert!(!dump.contains("invalid MIR"), "{}", dump);
     assert!(dump.contains("fn g::{closure#0}"), "{}", dump);
     // By-value capture: env field read directly, no deref.
-    assert!(dump.contains("copy _1.0") && !dump.contains("(*_1.0)"), "by-value env read:\n{}", dump);
+    assert!(
+        dump.contains("copy _1.0") && !dump.contains("(*_1.0)"),
+        "by-value env read:\n{}",
+        dump
+    );
 }
 
 #[test]
@@ -376,7 +392,11 @@ fn closure_without_captures_has_an_empty_env() {
     let dump = mir("fn h(xs: List<i64>) -> List<i64> { xs.map(|x| x * 2) }");
     assert!(!dump.contains("skipped"), "{}", dump);
     assert!(!dump.contains("invalid MIR"), "{}", dump);
-    assert!(dump.contains("closure h::{closure#0}()"), "empty env:\n{}", dump);
+    assert!(
+        dump.contains("closure h::{closure#0}()"),
+        "empty env:\n{}",
+        dump
+    );
 }
 
 #[test]
@@ -390,7 +410,11 @@ fn nested_closures_lift_with_hierarchical_names() {
     assert!(!dump.contains("skipped"), "{}", dump);
     assert!(!dump.contains("invalid MIR"), "{}", dump);
     assert!(dump.contains("fn nest::{closure#0}"), "outer:\n{}", dump);
-    assert!(dump.contains("fn nest::{closure#0}::{closure#0}"), "inner:\n{}", dump);
+    assert!(
+        dump.contains("fn nest::{closure#0}::{closure#0}"),
+        "inner:\n{}",
+        dump
+    );
 }
 
 #[test]

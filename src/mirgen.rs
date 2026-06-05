@@ -21,18 +21,90 @@
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use crate::ast::{BinOp, BindingId, UnOp};
+use crate::ast::{BinOp, BindingId, SelfKind, UnOp};
 use crate::hir::*;
 use crate::mir::*;
-use crate::ty::{IntKind, Ty, display_ty};
+use crate::ty::{IntKind, Ty, display_ty, ty_is_copy};
 
 /// An enum's variants in declaration order, each with its payload fields (an
 /// optional name — `Some(_)` for a struct-variant field — and the field type).
 /// This is the match-lowering counterpart of the type checker's
 /// `enum_variants_resolved`; built once from the HIR for variant discriminants.
 type VariantList = Vec<(String, Vec<(Option<String>, Ty)>)>;
+
+/// Per-function signatures used by ownership lowering (3.5) to decide which
+/// arguments/receivers a call *moves* — the MIR-side mirror of `borrowck`'s
+/// `Sigs`. Only **user-declared** functions/methods move; built-ins borrow.
+struct Sigs {
+    /// Free function name → per-(non-self)-param "is this taken by value?".
+    free_fns: HashMap<String, Vec<bool>>,
+    /// `(owner type, method)` → (receiver kind, per-param by-value flags).
+    methods: HashMap<(String, String), (SelfKind, Vec<bool>)>,
+}
+
+/// A parameter taken by value owns its argument (so passing a bare binding to it
+/// is a move); references, slices, and raw pointers borrow.
+fn is_by_value_ty(t: &Ty) -> bool {
+    !matches!(t, Ty::Ref(_) | Ty::Ptr(_) | Ty::Slice(_))
+}
+
+/// Collect the call signatures (mirrors `borrowck::collect_sigs`). The `self`
+/// param is excluded from the by-value list; the receiver is captured separately
+/// as the method's [`SelfKind`].
+fn collect_sigs(hir: &Hir) -> Sigs {
+    let mut sigs = Sigs {
+        free_fns: HashMap::new(),
+        methods: HashMap::new(),
+    };
+    for f in &hir.fns {
+        let by_val: Vec<bool> = f
+            .params
+            .iter()
+            .filter(|p| p.name != "self")
+            .map(|p| is_by_value_ty(&p.ty))
+            .collect();
+        match &f.owner {
+            Some(o) => {
+                sigs.methods
+                    .insert((o.clone(), f.name.clone()), (f.self_kind, by_val));
+            }
+            None => {
+                sigs.free_fns.insert(f.name.clone(), by_val);
+            }
+        }
+    }
+    sigs
+}
+
+/// Does a value of type `ty` own heap that a `drop` must release? Mirrors the
+/// type checker's `ty_needs_drop`, resolving struct/enum fields from the HIR
+/// tables (the built-in `Option`/`Result` take their payload from the type
+/// arguments — `Result` always owns its `Err(str)`).
+fn needs_drop(
+    ty: &Ty,
+    structs: &HashMap<String, Vec<Ty>>,
+    enums: &HashMap<String, VariantList>,
+) -> bool {
+    match ty {
+        Ty::Str | Ty::List(_) | Ty::Map(_, _) | Ty::Set(_) | Ty::Future(_) => true,
+        Ty::Tuple(ts) => ts.iter().any(|t| needs_drop(t, structs, enums)),
+        Ty::Array(e, _) => needs_drop(e, structs, enums),
+        Ty::Struct(name, _) => structs
+            .get(name)
+            .is_some_and(|fs| fs.iter().any(|t| needs_drop(t, structs, enums))),
+        Ty::Enum(name, args) => match name.as_str() {
+            "Option" => args.first().is_some_and(|t| needs_drop(t, structs, enums)),
+            "Result" => true,
+            _ => enums.get(name).is_some_and(|vs| {
+                vs.iter()
+                    .any(|(_, p)| p.iter().any(|(_, t)| needs_drop(t, structs, enums)))
+            }),
+        },
+        _ => false,
+    }
+}
 
 /// The product of lowering: the functions that lowered, plus the ones skipped
 /// (with the reason) so `la3 mir` can report honestly what 3.2 does not yet do.
@@ -43,12 +115,18 @@ pub(crate) struct LowerResult {
 
 /// Lower a whole HIR program to MIR.
 pub(crate) fn lower(hir: &Hir) -> LowerResult {
-    // Field declaration order per struct, for `Field`/`StructLit` projection.
+    // Field declaration order per struct, for `Field`/`StructLit` projection,
+    // plus field *types* per struct for the `needs_drop` walk (3.5).
     let mut struct_fields: HashMap<String, Vec<String>> = HashMap::new();
+    let mut struct_tys: HashMap<String, Vec<Ty>> = HashMap::new();
     for s in &hir.structs {
         struct_fields.insert(
             s.name.clone(),
             s.fields.iter().map(|(n, _)| n.clone()).collect(),
+        );
+        struct_tys.insert(
+            s.name.clone(),
+            s.fields.iter().map(|(_, t)| t.clone()).collect(),
         );
     }
     // Variant order + payload types per enum, for match discriminants (3.3).
@@ -71,10 +149,11 @@ pub(crate) fn lower(hir: &Hir) -> LowerResult {
             .collect();
         enums.insert(e.name.clone(), variants);
     }
+    let sigs = collect_sigs(hir);
     let mut program = MirProgram { fns: Vec::new() };
     let mut skipped = Vec::new();
     for f in &hir.fns {
-        let mut lo = FnLower::new(f, &struct_fields, &enums);
+        let mut lo = FnLower::new(f, &struct_fields, &struct_tys, &enums, &sigs);
         match lo.run(f) {
             Ok(mir) => {
                 // Validate the function and every closure lifted out of it; commit
@@ -112,6 +191,9 @@ struct LoopCtx {
     break_to: BlockId,
     /// `_0`-style slot a `break value` writes; `None` for value-less loops.
     break_val: Option<Local>,
+    /// Number of lexical scopes open when the loop was entered; `break`/`continue`
+    /// drop the owned locals of every scope opened *inside* the loop (3.5).
+    scope_depth: usize,
 }
 
 type R<T> = Result<T, String>;
@@ -126,7 +208,21 @@ struct FnLower<'a> {
     capture_place: HashMap<BindingId, Place>,
     loops: Vec<LoopCtx>,
     struct_fields: &'a HashMap<String, Vec<String>>,
+    struct_tys: &'a HashMap<String, Vec<Ty>>,
     enums: &'a HashMap<String, VariantList>,
+    sigs: &'a Sigs,
+    /// Owned (needs-drop) locals per open lexical scope, innermost last. A scope
+    /// is dropped (reverse declaration order) when control leaves it (3.5).
+    scopes: Vec<Vec<Local>>,
+    /// Locals moved out of (so their `drop` is the new owner's responsibility).
+    /// A move is once-per-binding (the borrow checker forbids use-after-move), so
+    /// a single flat set is sound. Drops, by contrast, are emitted at *every*
+    /// scope exit for non-moved owned locals: an early exit and the normal
+    /// fall-through are mutually exclusive paths, so each drops exactly once at
+    /// run time. (A *conditionally* moved binding is conservatively treated as
+    /// moved on all paths and so not dropped — a sound leak that the precise
+    /// drop-flag elaboration, deferred with 3.6's CFG dataflow, will fix.)
+    moved: HashSet<Local>,
     /// This function's mangled symbol, the prefix for any closure it lifts.
     sym: String,
     /// Counter for naming the closures lifted out of this body (`{sym}::{{closure#n}}`).
@@ -140,7 +236,9 @@ impl<'a> FnLower<'a> {
     fn new(
         f: &HFn,
         struct_fields: &'a HashMap<String, Vec<String>>,
+        struct_tys: &'a HashMap<String, Vec<Ty>>,
         enums: &'a HashMap<String, VariantList>,
+        sigs: &'a Sigs,
     ) -> Self {
         let mut args: Vec<(Ty, Option<String>)> = f
             .params
@@ -161,18 +259,29 @@ impl<'a> FnLower<'a> {
             binding_local.insert(v.binding, Local(idx));
         }
         let cur = b.new_block();
-        FnLower {
+        let mut lo = FnLower {
             b,
             cur,
             binding_local,
             capture_place: HashMap::new(),
             loops: Vec::new(),
             struct_fields,
+            struct_tys,
             enums,
+            sigs,
+            scopes: vec![Vec::new()], // function root scope (owns by-value params)
+            moved: HashSet::new(),
             sym: label(f),
             next_closure: 0,
             lifted: Vec::new(),
+        };
+        // A by-value, owned parameter is dropped by the callee at function exit.
+        let mut idx = 1u32;
+        for p in &f.params {
+            lo.register_owned(Local(idx), &p.ty);
+            idx += 1;
         }
+        lo
     }
 
     /// A [`FnLower`] for a **lifted closure body** (Phase 3.4). Its first
@@ -180,6 +289,7 @@ impl<'a> FnLower<'a> {
     /// parameters follow as `_2..`. Each capture resolves to a place inside `_1`
     /// — `_1.i` for a by-value capture, `(*_1.i)` for a by-reference one (the env
     /// field is then a `&T`), so reading/writing the capture goes through the env.
+    #[allow(clippy::too_many_arguments)]
     fn new_closure(
         sym: &str,
         env_ty: Ty,
@@ -187,7 +297,9 @@ impl<'a> FnLower<'a> {
         captures: &[HCapture],
         ret: Ty,
         struct_fields: &'a HashMap<String, Vec<String>>,
+        struct_tys: &'a HashMap<String, Vec<Ty>>,
         enums: &'a HashMap<String, VariantList>,
+        sigs: &'a Sigs,
     ) -> Self {
         let mut args: Vec<(Ty, Option<String>)> = vec![(env_ty, Some("env".into()))];
         for p in params {
@@ -218,22 +330,35 @@ impl<'a> FnLower<'a> {
             capture_place,
             loops: Vec::new(),
             struct_fields,
+            struct_tys,
             enums,
+            sigs,
+            scopes: vec![Vec::new()],
+            moved: HashSet::new(),
             sym: sym.to_string(),
             next_closure: 0,
             lifted: Vec::new(),
         };
         lo.cur = lo.b.new_block();
+        // Owned closure params drop at the closure's exit (the env's ownership is
+        // the Phase 8 closure ABI, so it is not dropped here).
+        let mut idx = 2u32;
+        for p in params {
+            lo.register_owned(Local(idx), &p.ty);
+            idx += 1;
+        }
         lo
     }
 
     fn run(&mut self, f: &HFn) -> R<MirFn> {
         let body = self.lower_block(&f.body)?;
-        // The body's tail value is the function's result; write it and return.
+        // The body's tail value is the function's result; write it, drop the
+        // function's owned parameters (root scope), then return.
         self.emit(Statement::Assign(
             Place::local(MirFn::return_local()),
             Rvalue::Use(body),
         ));
+        self.exit_scope();
         self.b.set_term(self.cur, Terminator::Return);
         Ok(std::mem::replace(&mut self.b, MirBuilder::new("", None, Ty::Unit, vec![])).finish())
     }
@@ -255,18 +380,109 @@ impl<'a> FnLower<'a> {
         self.b.new_temp(ty)
     }
 
+    // -- ownership lowering (3.5): scopes, drops, moves -------------------
+
+    fn enter_scope(&mut self) {
+        self.scopes.push(Vec::new());
+    }
+
+    /// Register a local as owned (so it is dropped at scope exit) iff its type
+    /// owns heap. Called for `let` bindings and by-value parameters.
+    fn register_owned(&mut self, local: Local, ty: &Ty) {
+        if needs_drop(ty, self.struct_tys, self.enums) {
+            self.scopes.last_mut().expect("a scope is open").push(local);
+        }
+    }
+
+    /// Emit `drop`s for `locals` in **reverse declaration order**, skipping any
+    /// moved-out binding (its new owner drops it).
+    fn drop_locals(&mut self, locals: &[Local]) {
+        for &l in locals.iter().rev() {
+            if !self.moved.contains(&l) {
+                self.emit(Statement::Drop(Place::local(l)));
+            }
+        }
+    }
+
+    /// Close the innermost scope, dropping its owned locals.
+    fn exit_scope(&mut self) {
+        let scope = self.scopes.pop().expect("a scope is open");
+        self.drop_locals(&scope);
+    }
+
+    /// Drop every open scope's owned locals (innermost first) — used at `return`,
+    /// which leaves all of them. Scopes stay on the stack; the divergence that
+    /// follows makes the subsequent normal `exit_scope` emit into dead code.
+    fn drop_all_open_scopes(&mut self) {
+        let scopes = self.scopes.clone();
+        for scope in scopes.iter().rev() {
+            self.drop_locals(scope);
+        }
+    }
+
+    /// Drop the owned locals of every scope opened *inside* the current loop —
+    /// used at `break`/`continue` (which leave the loop body but not the loop).
+    fn drop_scopes_to(&mut self, depth: usize) {
+        let scopes: Vec<Vec<Local>> = self.scopes[depth..].to_vec();
+        for scope in scopes.iter().rev() {
+            self.drop_locals(scope);
+        }
+    }
+
+    /// Read `place` (of type `ty`) in a **consuming** position: a non-`Copy`
+    /// value is `Move`d and its root local marked moved (so it is not later
+    /// dropped — its new owner is responsible); a `Copy` value is read by `Copy`.
+    fn consume(&mut self, place: Place, ty: &Ty) -> Operand {
+        if ty_is_copy(ty) {
+            Operand::Copy(place)
+        } else {
+            self.moved.insert(place.local);
+            Operand::Move(place)
+        }
+    }
+
+    /// Lower `e` as a consuming read. A non-`Copy` **place** (a binding, a field
+    /// or index of one, a deref) is moved out — for a projection this is a partial
+    /// move, conservatively retiring the whole root local so it is not also
+    /// dropped. `Copy` values and non-place expressions (a call result, an `if`/
+    /// `match`/block value — already a fresh temp) lower as usual.
+    fn lower_operand_consuming(&mut self, e: &HExpr) -> R<Operand> {
+        use HExprKind::*;
+        if !ty_is_copy(&e.ty)
+            && matches!(
+                &e.kind,
+                Local(_)
+                    | Field { .. }
+                    | Index { .. }
+                    | Unary {
+                        op: UnOp::Deref,
+                        ..
+                    }
+            )
+        {
+            let place = self.lower_place(e)?;
+            return Ok(self.consume(place, &e.ty));
+        }
+        self.lower_operand(e)
+    }
+
     // -- blocks / statements ----------------------------------------------
 
     /// Lower a block; the returned operand is the block's value (its tail, or
-    /// `()` when there is none).
+    /// `()` when there is none). The block is its own lexical scope: its owned
+    /// `let` bindings are dropped at its exit, after the tail value (which, if it
+    /// is a bare owned binding, escapes by move and so is not dropped).
     fn lower_block(&mut self, blk: &HBlock) -> R<Operand> {
+        self.enter_scope();
         for s in &blk.stmts {
             self.lower_stmt(s)?;
         }
-        match &blk.tail {
-            Some(e) => self.lower_operand(e),
-            None => Ok(Operand::Const(Const::Unit)),
-        }
+        let val = match &blk.tail {
+            Some(e) => self.lower_operand_consuming(e)?,
+            None => Operand::Const(Const::Unit),
+        };
+        self.exit_scope();
+        Ok(val)
     }
 
     fn lower_stmt(&mut self, s: &HStmt) -> R<()> {
@@ -278,8 +494,10 @@ impl<'a> FnLower<'a> {
                     let local = self.b.new_local(ty.clone(), LocalKind::User, None);
                     let rv = self.lower_rvalue(value)?;
                     self.emit(Statement::Assign(Place::local(local), rv));
-                    // Bind after lowering the value (matches HIR/resolution order).
+                    // Bind after lowering the value (matches HIR/resolution order),
+                    // and register an owned binding so it drops at scope exit.
                     self.binding_local.insert(*bid, local);
+                    self.register_owned(local, ty);
                     Ok(())
                 }
                 HPattern::Wildcard => {
@@ -294,13 +512,15 @@ impl<'a> FnLower<'a> {
             }
             HStmt::Return(e, _) => {
                 let v = match e {
-                    Some(e) => self.lower_operand(e)?,
+                    Some(e) => self.lower_operand_consuming(e)?,
                     None => Operand::Const(Const::Unit),
                 };
                 self.emit(Statement::Assign(
                     Place::local(MirFn::return_local()),
                     Rvalue::Use(v),
                 ));
+                // Leaving the function: drop every owned local still in scope.
+                self.drop_all_open_scopes();
                 self.diverge(Terminator::Return);
                 Ok(())
             }
@@ -309,22 +529,25 @@ impl<'a> FnLower<'a> {
                     .loops
                     .last()
                     .ok_or_else(|| "`break` outside a loop".to_string())?;
-                let (break_to, slot) = (ctx.break_to, ctx.break_val);
+                let (break_to, slot, depth) = (ctx.break_to, ctx.break_val, ctx.scope_depth);
                 if let Some(e) = e {
-                    let v = self.lower_operand(e)?;
+                    let v = self.lower_operand_consuming(e)?;
                     let slot =
                         slot.ok_or_else(|| "`break value` in a value-less loop".to_string())?;
                     self.emit(Statement::Assign(Place::local(slot), Rvalue::Use(v)));
                 }
+                // Leaving the loop body: drop the locals owned inside the loop.
+                self.drop_scopes_to(depth);
                 self.diverge(Terminator::Goto(break_to));
                 Ok(())
             }
             HStmt::Continue(_) => {
-                let to = self
+                let ctx = self
                     .loops
                     .last()
-                    .ok_or_else(|| "`continue` outside a loop".to_string())?
-                    .continue_to;
+                    .ok_or_else(|| "`continue` outside a loop".to_string())?;
+                let (to, depth) = (ctx.continue_to, ctx.scope_depth);
+                self.drop_scopes_to(depth);
                 self.diverge(Terminator::Goto(to));
                 Ok(())
             }
@@ -427,7 +650,11 @@ impl<'a> FnLower<'a> {
             },
             Cast { expr, ty } => Ok(Rvalue::Cast(self.lower_operand(expr)?, ty.clone())),
             Tuple(xs) => {
-                let ops = self.lower_operands(xs)?;
+                // Building an aggregate consumes (moves in) its fields.
+                let mut ops = Vec::with_capacity(xs.len());
+                for x in xs {
+                    ops.push(self.lower_operand_consuming(x)?);
+                }
                 Ok(Rvalue::Aggregate(AggregateKind::Tuple, ops))
             }
             StructLit {
@@ -449,17 +676,34 @@ impl<'a> FnLower<'a> {
                         .iter()
                         .find(|(n, _)| n == fname)
                         .ok_or_else(|| format!("missing field `{}` in `{}`", fname, name))?;
-                    ops.push(self.lower_operand(fe)?);
+                    ops.push(self.lower_operand_consuming(fe)?);
                 }
                 Ok(Rvalue::Aggregate(AggregateKind::Struct(name.clone()), ops))
             }
-            // Anything else: lower to an operand and use it.
-            _ => Ok(Rvalue::Use(self.lower_operand(e)?)),
+            // Anything else (a bare binding, a field/index read, …) used as an
+            // rvalue: lower as a consuming read (so `let y = x` / `x = y` move).
+            _ => Ok(Rvalue::Use(self.lower_operand_consuming(e)?)),
         }
     }
 
     fn lower_operands(&mut self, es: &[HExpr]) -> R<Vec<Operand>> {
         es.iter().map(|e| self.lower_operand(e)).collect()
+    }
+
+    /// Lower call arguments, consuming (moving) each one whose parameter is taken
+    /// by value (`by_val`); the rest borrow. `by_val` is `None` for callees with
+    /// no recorded signature (built-ins, constructors, indirect), which borrow.
+    fn lower_call_args(&mut self, args: &[HExpr], by_val: Option<&[bool]>) -> R<Vec<Operand>> {
+        let mut ops = Vec::with_capacity(args.len());
+        for (i, a) in args.iter().enumerate() {
+            let consume = by_val.is_some_and(|bv| bv.get(i).copied().unwrap_or(false));
+            ops.push(if consume {
+                self.lower_operand_consuming(a)?
+            } else {
+                self.lower_operand(a)?
+            });
+        }
+        Ok(ops)
     }
 
     /// Lower an lvalue expression to a [`Place`].
@@ -498,9 +742,14 @@ impl<'a> FnLower<'a> {
         use HExprKind::*;
         let (func, args): (Operand, Vec<Operand>) = match &e.kind {
             Call { callee, args } => {
-                let func = match &callee.kind {
-                    Global(name) => Operand::Const(Const::Fn(name.clone())),
-                    Path(segs) => Operand::Const(Const::Fn(segs.join("::"))),
+                // A by-value parameter of a user function moves its argument (3.5);
+                // built-ins/constructors borrow (no recorded signature).
+                let (func, by_val) = match &callee.kind {
+                    Global(name) => (
+                        Operand::Const(Const::Fn(name.clone())),
+                        self.sigs.free_fns.get(name).cloned(),
+                    ),
+                    Path(segs) => (Operand::Const(Const::Fn(segs.join("::"))), None),
                     // An indirect call through a closure/fn value needs the env-
                     // passing closure ABI, which lands with codegen in Phase 8.
                     _ => {
@@ -509,23 +758,40 @@ impl<'a> FnLower<'a> {
                         );
                     }
                 };
-                (func, self.lower_operands(args)?)
+                (func, self.lower_call_args(args, by_val.as_deref())?)
             }
             MethodCall { recv, method, args } => {
                 // A call on a module path (`io.println`) is a free function in that
                 // module; a call on a value (`x.len()`) is `Type::method(self, ..)`.
-                let (func, mut ops) = match &recv.kind {
+                let (func, mut ops, by_val) = match &recv.kind {
                     Global(module) => (
                         Operand::Const(Const::Fn(format!("{}.{}", module, method))),
                         Vec::new(),
+                        None,
                     ),
                     _ => {
-                        let recv_op = self.lower_operand(recv)?;
-                        let sym = format!("{}::{}", ty_symbol(&recv.ty), method);
-                        (Operand::Const(Const::Fn(sym)), vec![recv_op])
+                        let owner = ty_symbol(&recv.ty);
+                        let sig = self
+                            .sigs
+                            .methods
+                            .get(&(owner.clone(), method.clone()))
+                            .cloned();
+                        // A `self`/`mut self` method consumes the receiver; `&self`/
+                        // `&mut self` and built-ins borrow it.
+                        let recv_op = if matches!(&sig, Some((SelfKind::Value, _))) {
+                            self.lower_operand_consuming(recv)?
+                        } else {
+                            self.lower_operand(recv)?
+                        };
+                        let sym = format!("{}::{}", owner, method);
+                        (
+                            Operand::Const(Const::Fn(sym)),
+                            vec![recv_op],
+                            sig.map(|(_, bv)| bv),
+                        )
                     }
                 };
-                ops.extend(self.lower_operands(args)?);
+                ops.extend(self.lower_call_args(args, by_val.as_deref())?);
                 (func, ops)
             }
             Format { value, spec } => {
@@ -603,6 +869,7 @@ impl<'a> FnLower<'a> {
             continue_to: header,
             break_to: join,
             break_val: Some(result),
+            scope_depth: self.scopes.len(),
         });
         let _ = self.lower_block(body)?;
         self.b.set_term(self.cur, Terminator::Goto(header));
@@ -631,6 +898,7 @@ impl<'a> FnLower<'a> {
             continue_to: header,
             break_to: join,
             break_val: None,
+            scope_depth: self.scopes.len(),
         });
         let _ = self.lower_block(body)?;
         self.b.set_term(self.cur, Terminator::Goto(header));
@@ -694,6 +962,7 @@ impl<'a> FnLower<'a> {
             continue_to: incr,
             break_to: join,
             break_val: None,
+            scope_depth: self.scopes.len(),
         });
         let _ = self.lower_block(body)?;
         self.b.set_term(self.cur, Terminator::Goto(incr));
@@ -1152,7 +1421,9 @@ impl<'a> FnLower<'a> {
             captures,
             body.ty.clone(),
             self.struct_fields,
+            self.struct_tys,
             self.enums,
+            self.sigs,
         );
         let val = sub.lower_operand(body)?;
         sub.emit(Statement::Assign(
@@ -1161,7 +1432,8 @@ impl<'a> FnLower<'a> {
         ));
         sub.b.set_term(sub.cur, Terminator::Return);
         let nested = std::mem::take(&mut sub.lifted);
-        let mir = std::mem::replace(&mut sub.b, MirBuilder::new("", None, Ty::Unit, vec![])).finish();
+        let mir =
+            std::mem::replace(&mut sub.b, MirBuilder::new("", None, Ty::Unit, vec![])).finish();
         Ok((mir, nested))
     }
 
