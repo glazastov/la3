@@ -5,15 +5,23 @@
 //! which is linked in as a static library. This is the counterpart of the
 //! builtins in `src/interp.rs`, reimplemented for ahead-of-time compilation.
 //!
-//! Phase 0 establishes only the skeleton: the reference-counted heap header and
-//! the value tag enum that later phases (3 and 5) will flesh out. Everything
-//! here is `extern "C"` so the codegen can name these symbols directly.
+//! Everything here is `extern "C"` so the codegen can name these symbols
+//! directly.
 //!
-//! Memory model (v1): **ARC**. Every heap allocation begins with an [`RcHeader`]
-//! whose `strong` count is bumped by `la3_rc_inc` and dropped by `la3_rc_dec`;
-//! when it reaches zero the object's destructor runs and the block is freed.
+//! **Memory model: ownership** (move semantics + deterministic `drop`), *not*
+//! ARC — the user decision of 2026-06-01 superseded the earlier reference-
+//! counting plan. A heap value is owned by exactly one binding; the compiler
+//! (Phase 3.5) inserts a `drop` at the end of its scope, which lowers to the
+//! type's drop-glue symbol here (e.g. [`str::la3_str_drop`]). The owned heap
+//! types arrive type by type: [`str`] (Phase 4.1), then `List`/`Map`/`Set` (4.2).
+//!
+//! The Phase-0 [`RcHeader`]/[`Tag`] skeleton below predates the ownership
+//! decision and is now **legacy** (kept only so the Phase 0.5 link smoke-test is
+//! undisturbed); it is unused by the ownership-based types and will be retired.
 
 #![allow(dead_code)]
+
+pub mod str;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
