@@ -23,6 +23,7 @@
 #![allow(dead_code)]
 
 pub mod collections;
+pub mod fmt;
 pub mod str;
 
 use std::sync::atomic::{AtomicUsize, Ordering};

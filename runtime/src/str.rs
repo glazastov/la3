@@ -52,7 +52,7 @@ impl La3Str {
     }
 
     /// Copy `bytes` into a fresh owned buffer.
-    fn from_bytes(bytes: &[u8]) -> La3Str {
+    pub(crate) fn from_bytes(bytes: &[u8]) -> La3Str {
         if bytes.is_empty() {
             return La3Str::empty();
         }
@@ -60,7 +60,7 @@ impl La3Str {
     }
 
     /// The UTF-8 bytes, borrowed for the lifetime of `&self`.
-    fn as_bytes(&self) -> &[u8] {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
         if self.len == 0 {
             &[]
         } else {
