@@ -76,10 +76,23 @@ pub(crate) fn lower(hir: &Hir) -> LowerResult {
     for f in &hir.fns {
         let mut lo = FnLower::new(f, &struct_fields, &enums);
         match lo.run(f) {
-            Ok(mir) => match mir.validate() {
-                Ok(()) => program.fns.push(mir),
-                Err(es) => skipped.push((label(f), format!("invalid MIR: {}", es.join("; ")))),
-            },
+            Ok(mir) => {
+                // Validate the function and every closure lifted out of it; commit
+                // them together (or skip the whole function on any invalid MIR).
+                let lifted = std::mem::take(&mut lo.lifted);
+                let mut errs: Vec<String> = mir.validate().err().unwrap_or_default();
+                for lf in &lifted {
+                    if let Err(es) = lf.validate() {
+                        errs.extend(es.into_iter().map(|e| format!("{}: {}", lf.name, e)));
+                    }
+                }
+                if errs.is_empty() {
+                    program.fns.push(mir);
+                    program.fns.extend(lifted);
+                } else {
+                    skipped.push((label(f), format!("invalid MIR: {}", errs.join("; "))));
+                }
+            }
             Err(reason) => skipped.push((label(f), reason)),
         }
     }
@@ -107,9 +120,20 @@ struct FnLower<'a> {
     b: MirBuilder,
     cur: BlockId,
     binding_local: HashMap<BindingId, Local>,
+    /// Captures of a lifted closure body, resolved to places inside the env
+    /// parameter (`_1`); checked before [`Self::binding_local`]. Empty for a
+    /// normal (non-closure) function. Populated by [`FnLower::new_closure`].
+    capture_place: HashMap<BindingId, Place>,
     loops: Vec<LoopCtx>,
     struct_fields: &'a HashMap<String, Vec<String>>,
     enums: &'a HashMap<String, VariantList>,
+    /// This function's mangled symbol, the prefix for any closure it lifts.
+    sym: String,
+    /// Counter for naming the closures lifted out of this body (`{sym}::{{closure#n}}`).
+    next_closure: u32,
+    /// Functions lifted out of this body (closures and their nested closures).
+    /// Committed to the program alongside this function once it lowers cleanly.
+    lifted: Vec<MirFn>,
 }
 
 impl<'a> FnLower<'a> {
@@ -141,10 +165,66 @@ impl<'a> FnLower<'a> {
             b,
             cur,
             binding_local,
+            capture_place: HashMap::new(),
             loops: Vec::new(),
             struct_fields,
             enums,
+            sym: label(f),
+            next_closure: 0,
+            lifted: Vec::new(),
         }
+    }
+
+    /// A [`FnLower`] for a **lifted closure body** (Phase 3.4). Its first
+    /// parameter `_1` is the captured environment (a tuple); the closure's own
+    /// parameters follow as `_2..`. Each capture resolves to a place inside `_1`
+    /// — `_1.i` for a by-value capture, `(*_1.i)` for a by-reference one (the env
+    /// field is then a `&T`), so reading/writing the capture goes through the env.
+    fn new_closure(
+        sym: &str,
+        env_ty: Ty,
+        params: &[HParam],
+        captures: &[HCapture],
+        ret: Ty,
+        struct_fields: &'a HashMap<String, Vec<String>>,
+        enums: &'a HashMap<String, VariantList>,
+    ) -> Self {
+        let mut args: Vec<(Ty, Option<String>)> = vec![(env_ty, Some("env".into()))];
+        for p in params {
+            args.push((p.ty.clone(), Some(p.name.clone())));
+        }
+        let b = MirBuilder::new(sym.to_string(), None, ret, args);
+        let mut binding_local = HashMap::new();
+        // _0 = return, _1 = env, params are _2..
+        let mut idx = 2u32;
+        for p in params {
+            binding_local.insert(p.binding, Local(idx));
+            idx += 1;
+        }
+        // Captures map to projections of the env parameter `_1`.
+        let mut capture_place = HashMap::new();
+        for (i, c) in captures.iter().enumerate() {
+            let mut place = Place::local(Local(1));
+            place.proj.push(Projection::Field(i));
+            if c.mode == CaptureMode::Ref {
+                place.proj.push(Projection::Deref);
+            }
+            capture_place.insert(c.binding, place);
+        }
+        let mut lo = FnLower {
+            b,
+            cur: BlockId(0),
+            binding_local,
+            capture_place,
+            loops: Vec::new(),
+            struct_fields,
+            enums,
+            sym: sym.to_string(),
+            next_closure: 0,
+            lifted: Vec::new(),
+        };
+        lo.cur = lo.b.new_block();
+        lo
     }
 
     fn run(&mut self, f: &HFn) -> R<MirFn> {
@@ -317,7 +397,7 @@ impl<'a> FnLower<'a> {
             Unsafe(b) => self.lower_block(b),
 
             Match { .. } => self.lower_match(e),
-            Closure { .. } => Err("closures not lowered until Phase 3.4".into()),
+            Closure { .. } => self.lower_closure(e),
             List(_) | Set(_) | Map(_) | ListRepeat { .. } => {
                 Err("heap-collection literals need the runtime (Phase 4/6)".into())
             }
@@ -421,7 +501,13 @@ impl<'a> FnLower<'a> {
                 let func = match &callee.kind {
                     Global(name) => Operand::Const(Const::Fn(name.clone())),
                     Path(segs) => Operand::Const(Const::Fn(segs.join("::"))),
-                    _ => self.lower_operand(callee)?, // indirect call through a value
+                    // An indirect call through a closure/fn value needs the env-
+                    // passing closure ABI, which lands with codegen in Phase 8.
+                    _ => {
+                        return Err(
+                            "indirect call through a closure/fn value not lowered yet (Phase 8 closure ABI)".into(),
+                        );
+                    }
                 };
                 (func, self.lower_operands(args)?)
             }
@@ -991,9 +1077,100 @@ impl<'a> FnLower<'a> {
         self.binding_local.insert(bid, l);
     }
 
+    // -- closure conversion (3.4) -----------------------------------------
+
+    /// Lower a `Closure` HIR node: **lift** its body into a synthetic top-level
+    /// MIR function (env parameter + the closure's own parameters) and
+    /// **materialize** the `{fn ptr, env}` value at the site. The capture list
+    /// (Phase 2.5) decides each captured variable's env slot: a by-reference
+    /// capture becomes `&place`, a by-value capture the value itself. Calling
+    /// *through* the resulting value (the env-passing ABI) is Phase 8.
+    fn lower_closure(&mut self, e: &HExpr) -> R<Operand> {
+        let (params, captures, body) = match &e.kind {
+            HExprKind::Closure {
+                params,
+                captures,
+                body,
+                ..
+            } => (params, captures, body),
+            _ => unreachable!(),
+        };
+        let name = format!("{}::{{closure#{}}}", self.sym, self.next_closure);
+        self.next_closure += 1;
+
+        // Lift the body into its own function; commit it (and any nested closures)
+        // only once the whole parent lowers cleanly.
+        let (lifted_fn, nested) = self.lift_closure(&name, params, captures, body)?;
+        self.lifted.extend(nested);
+        self.lifted.push(lifted_fn);
+
+        // Build the captured environment at the site, in capture order.
+        let mut env_ops = Vec::with_capacity(captures.len());
+        for c in captures {
+            let place = self.binding_place(c.binding)?;
+            let op = match c.mode {
+                CaptureMode::Ref => {
+                    let r = self.temp(Ty::Ref(Box::new(c.ty.clone())));
+                    self.emit(Statement::Assign(Place::local(r), Rvalue::Ref(place)));
+                    Operand::Copy(Place::local(r))
+                }
+                CaptureMode::Value => Operand::Copy(place),
+            };
+            env_ops.push(op);
+        }
+        let val = self.temp(e.ty.clone());
+        self.emit(Statement::Assign(
+            Place::local(val),
+            Rvalue::Aggregate(AggregateKind::Closure(name), env_ops),
+        ));
+        Ok(Operand::Copy(Place::local(val)))
+    }
+
+    /// Lower a closure body into a standalone [`MirFn`]. The env parameter `_1`
+    /// is a tuple of the captured slots (`&T` for a by-ref capture, `T` for a
+    /// by-value one); the closure's parameters follow. Returns the lifted function
+    /// plus any functions lifted from closures nested inside it.
+    fn lift_closure(
+        &mut self,
+        name: &str,
+        params: &[HParam],
+        captures: &[HCapture],
+        body: &HExpr,
+    ) -> R<(MirFn, Vec<MirFn>)> {
+        let env_field_tys: Vec<Ty> = captures
+            .iter()
+            .map(|c| match c.mode {
+                CaptureMode::Ref => Ty::Ref(Box::new(c.ty.clone())),
+                CaptureMode::Value => c.ty.clone(),
+            })
+            .collect();
+        let env_ty = Ty::Tuple(env_field_tys);
+        let mut sub = FnLower::new_closure(
+            name,
+            env_ty,
+            params,
+            captures,
+            body.ty.clone(),
+            self.struct_fields,
+            self.enums,
+        );
+        let val = sub.lower_operand(body)?;
+        sub.emit(Statement::Assign(
+            Place::local(MirFn::return_local()),
+            Rvalue::Use(val),
+        ));
+        sub.b.set_term(sub.cur, Terminator::Return);
+        let nested = std::mem::take(&mut sub.lifted);
+        let mir = std::mem::replace(&mut sub.b, MirBuilder::new("", None, Ty::Unit, vec![])).finish();
+        Ok((mir, nested))
+    }
+
     // -- small helpers -----------------------------------------------------
 
     fn binding_place(&self, b: BindingId) -> R<Place> {
+        if let Some(p) = self.capture_place.get(&b) {
+            return Ok(p.clone());
+        }
         self.binding_local
             .get(&b)
             .map(|l| Place::local(*l))

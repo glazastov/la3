@@ -227,6 +227,11 @@ pub(crate) enum AggregateKind {
     Struct(String),
     /// `enum name`, variant index — e.g. `Some(x)` / `Ok(x)`.
     Variant(String, usize),
+    /// A closure value `{fn ptr, env}` (Phase 3.4 closure conversion). The
+    /// `String` is the lifted function's symbol; the operands are the captured
+    /// environment, in capture order (the lifted function receives them packed as
+    /// its first parameter, an env tuple).
+    Closure(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -666,6 +671,7 @@ fn fmt_rvalue(rv: &Rvalue) -> String {
                 AggregateKind::Array => "array".to_string(),
                 AggregateKind::Struct(n) => n.clone(),
                 AggregateKind::Variant(n, v) => format!("{}::variant#{}", n, v),
+                AggregateKind::Closure(name) => format!("closure {}", name),
             };
             format!("{}({})", head, fs.join(", "))
         }
@@ -851,6 +857,12 @@ mod tests {
             ],
         );
         assert_eq!(fmt_rvalue(&tup), "tuple(const 1_i32, const true)");
+        // A closure value: `{fn ptr, env}` rendered with the lifted symbol.
+        let clo = Rvalue::Aggregate(
+            AggregateKind::Closure("f::{closure#0}".into()),
+            vec![Operand::Copy(Place::local(Local(1)))],
+        );
+        assert_eq!(fmt_rvalue(&clo), "closure f::{closure#0}(copy _1)");
     }
 
     #[test]

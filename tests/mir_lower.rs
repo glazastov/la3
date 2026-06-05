@@ -332,3 +332,76 @@ fn match_with_an_unsupported_pattern_still_bails_honestly() {
     assert!(dump.contains("skipped — list pattern"), "{}", dump);
     assert!(!dump.contains("invalid MIR"), "{}", dump);
 }
+
+// -- closure conversion (Phase 3.4) ---------------------------------------
+
+#[test]
+fn closure_with_a_by_ref_capture_lifts_and_borrows() {
+    // `|x| x > threshold` borrows `threshold`: the env holds `&i32`, and the
+    // lifted body reads the capture through a deref.
+    let src = "fn f(xs: List<i64>) -> List<i64> {\n\
+               let threshold = 100\n\
+               xs.map(|x| x > threshold)\n\
+               }";
+    let dump = mir(src);
+    assert!(!dump.contains("skipped"), "closure must lower:\n{}", dump);
+    assert!(!dump.contains("invalid MIR"), "{}", dump);
+    // A lifted top-level function with the env parameter.
+    assert!(dump.contains("fn f::{closure#0}"), "lifted fn:\n{}", dump);
+    assert!(dump.contains("// env"), "env parameter:\n{}", dump);
+    // The site takes a reference and builds the closure value.
+    assert!(dump.contains("= &_2"), "by-ref capture takes a borrow:\n{}", dump);
+    assert!(dump.contains("closure f::{closure#0}("), "closure value:\n{}", dump);
+    // The capture is read through the env via a deref.
+    assert!(dump.contains("(*_1.0)"), "capture read through env:\n{}", dump);
+}
+
+#[test]
+fn move_closure_captures_by_value() {
+    // `move |x| x * base` owns `base`: the env field is the value (no deref).
+    let src = "fn g(xs: List<i64>) -> List<i64> {\n\
+               let base = 7\n\
+               xs.map(move |x| x * base)\n\
+               }";
+    let dump = mir(src);
+    assert!(!dump.contains("skipped"), "{}", dump);
+    assert!(!dump.contains("invalid MIR"), "{}", dump);
+    assert!(dump.contains("fn g::{closure#0}"), "{}", dump);
+    // By-value capture: env field read directly, no deref.
+    assert!(dump.contains("copy _1.0") && !dump.contains("(*_1.0)"), "by-value env read:\n{}", dump);
+}
+
+#[test]
+fn closure_without_captures_has_an_empty_env() {
+    let dump = mir("fn h(xs: List<i64>) -> List<i64> { xs.map(|x| x * 2) }");
+    assert!(!dump.contains("skipped"), "{}", dump);
+    assert!(!dump.contains("invalid MIR"), "{}", dump);
+    assert!(dump.contains("closure h::{closure#0}()"), "empty env:\n{}", dump);
+}
+
+#[test]
+fn nested_closures_lift_with_hierarchical_names() {
+    // A closure inside a closure: each lifts to its own function, the inner one
+    // named under the outer.
+    let src = "fn nest(xs: List<i64>, ys: List<i64>) {\n\
+               let z = xs.map(|x| ys.map(|y| x + y))\n\
+               }";
+    let dump = mir(src);
+    assert!(!dump.contains("skipped"), "{}", dump);
+    assert!(!dump.contains("invalid MIR"), "{}", dump);
+    assert!(dump.contains("fn nest::{closure#0}"), "outer:\n{}", dump);
+    assert!(dump.contains("fn nest::{closure#0}::{closure#0}"), "inner:\n{}", dump);
+}
+
+#[test]
+fn calling_a_closure_value_bails_until_phase_8() {
+    // Building the `{fn ptr, env}` value is 3.4; calling *through* it needs the
+    // env-passing ABI (Phase 8), so a direct closure call is skipped honestly.
+    let dump = mir("fn d() -> i64 { let g = |x| x + 1; g(2) }");
+    assert!(
+        dump.contains("skipped — indirect call through a closure/fn value"),
+        "{}",
+        dump
+    );
+    assert!(!dump.contains("invalid MIR"), "{}", dump);
+}
