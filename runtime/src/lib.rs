@@ -13,7 +13,8 @@
 //! counting plan. A heap value is owned by exactly one binding; the compiler
 //! (Phase 3.5) inserts a `drop` at the end of its scope, which lowers to the
 //! type's drop-glue symbol here (e.g. [`str::la3_str_drop`]). The owned heap
-//! types arrive type by type: [`str`] (Phase 4.1), then `List`/`Map`/`Set` (4.2).
+//! types arrive type by type: [`str`] (Phase 4.1) and the [`collections`]
+//! `List`/`Map`/`Set` (Phase 4.2).
 //!
 //! The Phase-0 [`RcHeader`]/[`Tag`] skeleton below predates the ownership
 //! decision and is now **legacy** (kept only so the Phase 0.5 link smoke-test is
@@ -21,6 +22,7 @@
 
 #![allow(dead_code)]
 
+pub mod collections;
 pub mod str;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
