@@ -621,7 +621,9 @@ impl BorrowCk<'_> {
                     self.check_borrows_expr(a, active);
                 }
             }
-            ExprKind::Unary { expr, .. } | ExprKind::Cast { expr, .. } | ExprKind::Try(expr)
+            ExprKind::Unary { expr, .. }
+            | ExprKind::Cast { expr, .. }
+            | ExprKind::Try(expr)
             | ExprKind::Await(expr) => self.check_borrows_expr(expr, active),
             ExprKind::Binary { lhs, rhs, .. } | ExprKind::Coalesce { lhs, rhs } => {
                 self.check_borrows_expr(lhs, active);
@@ -681,7 +683,10 @@ impl BorrowCk<'_> {
                 self.check_borrows_expr(cond, active);
                 self.check_borrows_block(body, active);
             }
-            ExprKind::WhileLet { expr, body, .. } | ExprKind::For { iter: expr, body, .. } => {
+            ExprKind::WhileLet { expr, body, .. }
+            | ExprKind::For {
+                iter: expr, body, ..
+            } => {
                 self.check_borrows_expr(expr, active);
                 self.check_borrows_block(body, active);
             }
@@ -725,7 +730,12 @@ impl BorrowCk<'_> {
             let held = if b.place == *place {
                 format!("while it is {}borrowed by `{}`", how, b.borrower)
             } else {
-                format!("while `{}` is {}borrowed by `{}`", b.place.render(), how, b.borrower)
+                format!(
+                    "while `{}` is {}borrowed by `{}`",
+                    b.place.render(),
+                    how,
+                    b.borrower
+                )
             };
             self.err(
                 pos,
@@ -1014,7 +1024,9 @@ fn collect_refs(e: &Expr, idents: &mut Vec<(String, NodeId)>, bound: &mut HashSe
             collect_refs(v, idents, bound);
         }),
         ExprKind::StructLit { fields, spread, .. } => {
-            fields.iter().for_each(|(_, v)| collect_refs(v, idents, bound));
+            fields
+                .iter()
+                .for_each(|(_, v)| collect_refs(v, idents, bound));
             if let Some(s) = spread {
                 collect_refs(s, idents, bound);
             }

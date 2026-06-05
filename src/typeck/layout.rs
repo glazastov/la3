@@ -187,12 +187,10 @@ impl TypeChecker {
             Ty::Struct(name, args) => self
                 .struct_fields_resolved(name, args)
                 .is_some_and(|fs| fs.iter().any(|(_, ft)| self.ty_needs_drop(ft))),
-            Ty::Enum(name, args) => self
-                .enum_variants_resolved(name, args)
-                .is_some_and(|vs| {
-                    vs.iter()
-                        .any(|(_, payload)| payload.iter().any(|(_, ft)| self.ty_needs_drop(ft)))
-                }),
+            Ty::Enum(name, args) => self.enum_variants_resolved(name, args).is_some_and(|vs| {
+                vs.iter()
+                    .any(|(_, payload)| payload.iter().any(|(_, ft)| self.ty_needs_drop(ft)))
+            }),
             // Scalars, `nil`/`()`/`!`, `&T`/`*T`, slices (borrowed), `fn`,
             // generics, and unresolved types carry no owned heap.
             _ => false,
@@ -412,8 +410,7 @@ pub fn dump_layouts(prog: &Program) -> Layouts {
                                 }
                             })
                             .collect();
-                        let needs_drop =
-                            tc.ty_needs_drop(&Ty::Struct(s.name.clone(), Vec::new()));
+                        let needs_drop = tc.ty_needs_drop(&Ty::Struct(s.name.clone(), Vec::new()));
                         structs.push(StructLayout {
                             name: s.name.clone(),
                             size,

@@ -86,7 +86,11 @@ impl Parser {
                 let is_mut = self.eat(&Tok::Mut);
                 if self.eat(&Tok::SelfKw) {
                     // `&self` shares, `&mut self` exclusively borrows.
-                    self_kind = if is_mut { SelfKind::RefMut } else { SelfKind::Ref };
+                    self_kind = if is_mut {
+                        SelfKind::RefMut
+                    } else {
+                        SelfKind::Ref
+                    };
                     params.push(Param {
                         name: "self".into(),
                         ty: None,

@@ -40,35 +40,63 @@ fn distinct_bindings_get_distinct_ids() {
 #[test]
 fn shadowing_resolves_each_use_to_the_binding_in_scope() {
     // `let y = x` sees the first `x` (#0); after `let x = 2` (#2), the use sees #2.
-    let dump = resolve("fn main() { let x = 1; let y = x; let x = 2; io.println(x); io.println(y) }");
-    assert!(dump.contains("x -> #0"), "early x should resolve to #0:\n{}", dump);
-    assert!(dump.contains("x -> #2"), "shadowed x should resolve to #2:\n{}", dump);
-    assert!(dump.contains("y -> #1"), "y should resolve to #1:\n{}", dump);
+    let dump =
+        resolve("fn main() { let x = 1; let y = x; let x = 2; io.println(x); io.println(y) }");
+    assert!(
+        dump.contains("x -> #0"),
+        "early x should resolve to #0:\n{}",
+        dump
+    );
+    assert!(
+        dump.contains("x -> #2"),
+        "shadowed x should resolve to #2:\n{}",
+        dump
+    );
+    assert!(
+        dump.contains("y -> #1"),
+        "y should resolve to #1:\n{}",
+        dump
+    );
 }
 
 #[test]
 fn inner_scope_binding_does_not_escape() {
     // The inner `x` (#1) is used inside the block; the outer use sees the outer x (#0).
-    let dump = resolve(
-        "fn main() { let x = 1; { let x = 2; io.println(x) } io.println(x) }",
+    let dump = resolve("fn main() { let x = 1; { let x = 2; io.println(x) } io.println(x) }");
+    assert!(
+        dump.contains("x -> #0"),
+        "outer use should be #0:\n{}",
+        dump
     );
-    assert!(dump.contains("x -> #0"), "outer use should be #0:\n{}", dump);
-    assert!(dump.contains("x -> #1"), "inner use should be #1:\n{}", dump);
+    assert!(
+        dump.contains("x -> #1"),
+        "inner use should be #1:\n{}",
+        dump
+    );
 }
 
 #[test]
 fn parameters_are_bindings_and_uses_resolve_to_them() {
-    let dump = resolve("fn add(a: i32, b: i32) -> i32 { a + b }\nfn main() { io.println(add(1, 2)) }");
+    let dump =
+        resolve("fn add(a: i32, b: i32) -> i32 { a + b }\nfn main() { io.println(add(1, 2)) }");
     assert!(dump.contains("#0   a"), "dump:\n{}", dump);
     assert!(dump.contains("#1   b"), "dump:\n{}", dump);
-    assert!(dump.contains("a -> #0") && dump.contains("b -> #1"), "dump:\n{}", dump);
+    assert!(
+        dump.contains("a -> #0") && dump.contains("b -> #1"),
+        "dump:\n{}",
+        dump
+    );
 }
 
 #[test]
 fn loop_pattern_binding_is_resolved() {
     let dump = resolve("fn main() { for i in 0..3 { io.println(i) } }");
     // `i` is a binding and the use inside the body resolves to it.
-    assert!(dump.contains("i -> #0"), "loop var use should resolve:\n{}", dump);
+    assert!(
+        dump.contains("i -> #0"),
+        "loop var use should resolve:\n{}",
+        dump
+    );
 }
 
 #[test]
@@ -81,5 +109,9 @@ fn globals_and_builtins_are_not_local_bindings() {
         .skip_while(|l| !l.starts_with("uses:"))
         .filter(|l| l.contains("-> #"))
         .count();
-    assert_eq!(use_lines, 1, "only `a` should resolve to a local:\n{}", dump);
+    assert_eq!(
+        use_lines, 1,
+        "only `a` should resolve to a local:\n{}",
+        dump
+    );
 }

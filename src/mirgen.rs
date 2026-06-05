@@ -23,10 +23,16 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{BindingId, BinOp, UnOp};
+use crate::ast::{BinOp, BindingId, UnOp};
 use crate::hir::*;
 use crate::mir::*;
-use crate::ty::Ty;
+use crate::ty::{IntKind, Ty, display_ty};
+
+/// An enum's variants in declaration order, each with its payload fields (an
+/// optional name — `Some(_)` for a struct-variant field — and the field type).
+/// This is the match-lowering counterpart of the type checker's
+/// `enum_variants_resolved`; built once from the HIR for variant discriminants.
+type VariantList = Vec<(String, Vec<(Option<String>, Ty)>)>;
 
 /// The product of lowering: the functions that lowered, plus the ones skipped
 /// (with the reason) so `la3 mir` can report honestly what 3.2 does not yet do.
@@ -40,12 +46,35 @@ pub(crate) fn lower(hir: &Hir) -> LowerResult {
     // Field declaration order per struct, for `Field`/`StructLit` projection.
     let mut struct_fields: HashMap<String, Vec<String>> = HashMap::new();
     for s in &hir.structs {
-        struct_fields.insert(s.name.clone(), s.fields.iter().map(|(n, _)| n.clone()).collect());
+        struct_fields.insert(
+            s.name.clone(),
+            s.fields.iter().map(|(n, _)| n.clone()).collect(),
+        );
+    }
+    // Variant order + payload types per enum, for match discriminants (3.3).
+    let mut enums: HashMap<String, VariantList> = HashMap::new();
+    for e in &hir.enums {
+        let variants = e
+            .variants
+            .iter()
+            .map(|v| {
+                let fields = match &v.kind {
+                    HVariantKind::Unit => Vec::new(),
+                    HVariantKind::Tuple(tys) => tys.iter().map(|t| (None, t.clone())).collect(),
+                    HVariantKind::Struct(fs) => fs
+                        .iter()
+                        .map(|(n, t)| (Some(n.clone()), t.clone()))
+                        .collect(),
+                };
+                (v.name.clone(), fields)
+            })
+            .collect();
+        enums.insert(e.name.clone(), variants);
     }
     let mut program = MirProgram { fns: Vec::new() };
     let mut skipped = Vec::new();
     for f in &hir.fns {
-        let mut lo = FnLower::new(f, &struct_fields);
+        let mut lo = FnLower::new(f, &struct_fields, &enums);
         match lo.run(f) {
             Ok(mir) => match mir.validate() {
                 Ok(()) => program.fns.push(mir),
@@ -80,10 +109,15 @@ struct FnLower<'a> {
     binding_local: HashMap<BindingId, Local>,
     loops: Vec<LoopCtx>,
     struct_fields: &'a HashMap<String, Vec<String>>,
+    enums: &'a HashMap<String, VariantList>,
 }
 
 impl<'a> FnLower<'a> {
-    fn new(f: &HFn, struct_fields: &'a HashMap<String, Vec<String>>) -> Self {
+    fn new(
+        f: &HFn,
+        struct_fields: &'a HashMap<String, Vec<String>>,
+        enums: &'a HashMap<String, VariantList>,
+    ) -> Self {
         let mut args: Vec<(Ty, Option<String>)> = f
             .params
             .iter()
@@ -109,19 +143,19 @@ impl<'a> FnLower<'a> {
             binding_local,
             loops: Vec::new(),
             struct_fields,
+            enums,
         }
     }
 
     fn run(&mut self, f: &HFn) -> R<MirFn> {
         let body = self.lower_block(&f.body)?;
         // The body's tail value is the function's result; write it and return.
-        self.emit(Statement::Assign(Place::local(MirFn::return_local()), Rvalue::Use(body)));
+        self.emit(Statement::Assign(
+            Place::local(MirFn::return_local()),
+            Rvalue::Use(body),
+        ));
         self.b.set_term(self.cur, Terminator::Return);
-        Ok(std::mem::replace(
-            &mut self.b,
-            MirBuilder::new("", None, Ty::Unit, vec![]),
-        )
-        .finish())
+        Ok(std::mem::replace(&mut self.b, MirBuilder::new("", None, Ty::Unit, vec![])).finish())
     }
 
     // -- emission helpers --------------------------------------------------
@@ -158,10 +192,7 @@ impl<'a> FnLower<'a> {
     fn lower_stmt(&mut self, s: &HStmt) -> R<()> {
         match s {
             HStmt::Let {
-                pattern,
-                ty,
-                value,
-                ..
+                pattern, ty, value, ..
             } => match pattern {
                 HPattern::Binding(bid) => {
                     let local = self.b.new_local(ty.clone(), LocalKind::User, None);
@@ -186,7 +217,10 @@ impl<'a> FnLower<'a> {
                     Some(e) => self.lower_operand(e)?,
                     None => Operand::Const(Const::Unit),
                 };
-                self.emit(Statement::Assign(Place::local(MirFn::return_local()), Rvalue::Use(v)));
+                self.emit(Statement::Assign(
+                    Place::local(MirFn::return_local()),
+                    Rvalue::Use(v),
+                ));
                 self.diverge(Terminator::Return);
                 Ok(())
             }
@@ -198,7 +232,8 @@ impl<'a> FnLower<'a> {
                 let (break_to, slot) = (ctx.break_to, ctx.break_val);
                 if let Some(e) = e {
                     let v = self.lower_operand(e)?;
-                    let slot = slot.ok_or_else(|| "`break value` in a value-less loop".to_string())?;
+                    let slot =
+                        slot.ok_or_else(|| "`break value` in a value-less loop".to_string())?;
                     self.emit(Statement::Assign(Place::local(slot), Rvalue::Use(v)));
                 }
                 self.diverge(Terminator::Goto(break_to));
@@ -213,9 +248,7 @@ impl<'a> FnLower<'a> {
                 self.diverge(Terminator::Goto(to));
                 Ok(())
             }
-            HStmt::Fn(_) | HStmt::Const(_) => {
-                Err("nested fn/const item not lowered yet".into())
-            }
+            HStmt::Fn(_) | HStmt::Const(_) => Err("nested fn/const item not lowered yet".into()),
         }
     }
 
@@ -236,6 +269,16 @@ impl<'a> FnLower<'a> {
             Global(name) => Ok(Operand::Const(Const::Fn(name.clone()))),
             Path(segs) => Ok(Operand::Const(Const::Fn(segs.join("::")))),
 
+            // `module.CONST` (a field on a module path, e.g. `math.pi`) is a
+            // qualified global *value*, not a place projection — mirror how a bare
+            // `Global` lowers (a named global reference the back-end resolves).
+            Field { recv, name } if matches!(recv.kind, Global(_)) => {
+                let module = match &recv.kind {
+                    Global(m) => m.clone(),
+                    _ => unreachable!(),
+                };
+                Ok(Operand::Const(Const::Fn(format!("{}.{}", module, name))))
+            }
             Field { .. } | Index { .. } => Ok(Operand::Copy(self.lower_place(e)?)),
 
             // Compound value-producing expressions go through an rvalue + temp.
@@ -273,7 +316,7 @@ impl<'a> FnLower<'a> {
             }
             Unsafe(b) => self.lower_block(b),
 
-            Match { .. } => Err("`match` not lowered until Phase 3.3".into()),
+            Match { .. } => self.lower_match(e),
             Closure { .. } => Err("closures not lowered until Phase 3.4".into()),
             List(_) | Set(_) | Map(_) | ListRepeat { .. } => {
                 Err("heap-collection literals need the runtime (Phase 4/6)".into())
@@ -296,9 +339,7 @@ impl<'a> FnLower<'a> {
                 Ok(Rvalue::Binary(*op, a, b))
             }
             Unary { op, expr } => match op {
-                UnOp::Ref | UnOp::RefMut | UnOp::RawRef => {
-                    Ok(Rvalue::Ref(self.lower_place(expr)?))
-                }
+                UnOp::Ref | UnOp::RefMut | UnOp::RawRef => Ok(Rvalue::Ref(self.lower_place(expr)?)),
                 UnOp::Deref => Ok(Rvalue::Use(Operand::Copy(self.lower_place(e)?))),
                 UnOp::Neg | UnOp::Not | UnOp::BitNot => {
                     Ok(Rvalue::Unary(*op, self.lower_operand(expr)?))
@@ -348,7 +389,8 @@ impl<'a> FnLower<'a> {
             Local(bid) => self.binding_place(*bid),
             Field { recv, name } => {
                 let mut p = self.lower_place(recv)?;
-                p.proj.push(Projection::Field(self.field_index(&recv.ty, name)?));
+                p.proj
+                    .push(Projection::Field(self.field_index(&recv.ty, name)?));
                 Ok(p)
             }
             Index { recv, index } => {
@@ -546,7 +588,11 @@ impl<'a> FnLower<'a> {
         let op = if inclusive { BinOp::Le } else { BinOp::Lt };
         self.emit(Statement::Assign(
             Place::local(cmp),
-            Rvalue::Binary(op, Operand::Copy(Place::local(i)), Operand::Copy(Place::local(end_l))),
+            Rvalue::Binary(
+                op,
+                Operand::Copy(Place::local(i)),
+                Operand::Copy(Place::local(end_l)),
+            ),
         ));
         self.b.set_term(
             self.cur,
@@ -579,6 +625,370 @@ impl<'a> FnLower<'a> {
         self.b.set_term(self.cur, Terminator::Goto(header));
         self.cur = join;
         Ok(())
+    }
+
+    // -- match → decision tree (3.3) --------------------------------------
+
+    /// Lower a `match` to a decision tree. Arms are tested top-to-bottom, first
+    /// match wins (mirroring the interpreter oracle): each arm emits a chain of
+    /// tests routing to its body block on success or to the *next arm* on failure,
+    /// and the body's value is threaded into a result temp. Because `match` is
+    /// exhaustive (reference Section 7), the fall-through past the last arm is
+    /// statically [`Terminator::Unreachable`].
+    fn lower_match(&mut self, e: &HExpr) -> R<Operand> {
+        let (scrut, arms) = match &e.kind {
+            HExprKind::Match { scrutinee, arms } => (scrutinee, arms),
+            _ => unreachable!(),
+        };
+        // Materialize the scrutinee so the patterns can re-read and project it.
+        let scrut_op = self.lower_operand(scrut)?;
+        let sty = scrut.ty.clone();
+        let scrut_local = self.into_local(scrut_op, sty.clone());
+        let scrut_place = Place::local(scrut_local);
+        let result = self.temp(e.ty.clone());
+        let join = self.b.new_block();
+        for arm in arms {
+            let body_blk = self.b.new_block();
+            let next_blk = self.b.new_block();
+            self.test_pattern(&arm.pattern, &scrut_place, &sty, body_blk, next_blk)?;
+            // The arm body, gated by its guard (a failed guard falls to next arm).
+            self.cur = body_blk;
+            if let Some(guard) = &arm.guard {
+                let g = self.lower_operand(guard)?;
+                let run = self.b.new_block();
+                self.b.set_term(
+                    self.cur,
+                    Terminator::If {
+                        cond: g,
+                        then_blk: run,
+                        else_blk: next_blk,
+                    },
+                );
+                self.cur = run;
+            }
+            let bv = self.lower_operand(&arm.body)?;
+            self.emit(Statement::Assign(Place::local(result), Rvalue::Use(bv)));
+            self.b.set_term(self.cur, Terminator::Goto(join));
+            self.cur = next_blk;
+        }
+        self.b.set_term(self.cur, Terminator::Unreachable);
+        self.cur = join;
+        Ok(Operand::Copy(Place::local(result)))
+    }
+
+    /// Emit, starting at `self.cur`, the tests for `pat` against `place` (of type
+    /// `ty`). Bindings are established on the success path; control reaches
+    /// `success` when the pattern matches and `fail` otherwise. The function
+    /// always terminates `self.cur`.
+    fn test_pattern(
+        &mut self,
+        pat: &HPattern,
+        place: &Place,
+        ty: &Ty,
+        success: BlockId,
+        fail: BlockId,
+    ) -> R<()> {
+        match pat {
+            HPattern::Wildcard => {
+                self.b.set_term(self.cur, Terminator::Goto(success));
+            }
+            HPattern::Binding(bid) => {
+                self.bind_place(*bid, place, ty);
+                self.b.set_term(self.cur, Terminator::Goto(success));
+            }
+            HPattern::At(bid, sub) => {
+                // Test the sub-pattern; bind the whole value only once it matches.
+                let bind_blk = self.b.new_block();
+                self.test_pattern(sub, place, ty, bind_blk, fail)?;
+                self.cur = bind_blk;
+                self.bind_place(*bid, place, ty);
+                self.b.set_term(self.cur, Terminator::Goto(success));
+            }
+            HPattern::Int(n) => self.switch_eq(place, *n as i128, success, fail),
+            HPattern::Char(c) => self.switch_eq(place, *c as i128, success, fail),
+            HPattern::Bool(b) => {
+                // Two-way branch on the bool value itself.
+                let (then_blk, else_blk) = if *b { (success, fail) } else { (fail, success) };
+                self.b.set_term(
+                    self.cur,
+                    Terminator::If {
+                        cond: Operand::Copy(place.clone()),
+                        then_blk,
+                        else_blk,
+                    },
+                );
+            }
+            HPattern::Str(s) => {
+                // Structural string equality; the runtime `str` eq lands in Phase 4,
+                // the `Binary(Eq, …)` is valid MIR meanwhile.
+                let eq = self.temp(Ty::Bool);
+                self.emit(Statement::Assign(
+                    Place::local(eq),
+                    Rvalue::Binary(
+                        BinOp::Eq,
+                        Operand::Copy(place.clone()),
+                        Operand::Const(Const::Str(s.clone())),
+                    ),
+                ));
+                self.b.set_term(
+                    self.cur,
+                    Terminator::If {
+                        cond: Operand::Copy(Place::local(eq)),
+                        then_blk: success,
+                        else_blk: fail,
+                    },
+                );
+            }
+            HPattern::Range { lo, hi, inclusive } => {
+                // lo <= place && place </<= hi, as two chained comparisons.
+                let ge = self.temp(Ty::Bool);
+                self.emit(Statement::Assign(
+                    Place::local(ge),
+                    Rvalue::Binary(
+                        BinOp::Ge,
+                        Operand::Copy(place.clone()),
+                        Operand::Const(Const::Int(*lo, ty.clone())),
+                    ),
+                ));
+                let chk_hi = self.b.new_block();
+                self.b.set_term(
+                    self.cur,
+                    Terminator::If {
+                        cond: Operand::Copy(Place::local(ge)),
+                        then_blk: chk_hi,
+                        else_blk: fail,
+                    },
+                );
+                self.cur = chk_hi;
+                let le = self.temp(Ty::Bool);
+                let op = if *inclusive { BinOp::Le } else { BinOp::Lt };
+                self.emit(Statement::Assign(
+                    Place::local(le),
+                    Rvalue::Binary(
+                        op,
+                        Operand::Copy(place.clone()),
+                        Operand::Const(Const::Int(*hi, ty.clone())),
+                    ),
+                ));
+                self.b.set_term(
+                    self.cur,
+                    Terminator::If {
+                        cond: Operand::Copy(Place::local(le)),
+                        then_blk: success,
+                        else_blk: fail,
+                    },
+                );
+            }
+            HPattern::Tuple(subs) => {
+                let elems = match ty {
+                    Ty::Tuple(es) => es.clone(),
+                    _ => return Err(format!("tuple pattern on non-tuple {}", display_ty(ty))),
+                };
+                let parts: Vec<(&HPattern, Place, Ty)> = subs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| {
+                        let mut sp = place.clone();
+                        sp.proj.push(Projection::Field(i));
+                        (p, sp, elems.get(i).cloned().unwrap_or(Ty::Unknown))
+                    })
+                    .collect();
+                self.test_seq(parts, success, fail)?;
+            }
+            HPattern::Variant { path, args } => {
+                let variant = path.last().map(|s| s.as_str()).unwrap_or("");
+                let (vidx, payload) = self.switch_variant(place, ty, variant, fail)?;
+                let parts: Vec<(&HPattern, Place, Ty)> = args
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| {
+                        let mut sp = place.clone();
+                        sp.proj.push(Projection::Downcast(vidx));
+                        sp.proj.push(Projection::Field(i));
+                        let fty = payload
+                            .get(i)
+                            .map(|(_, t)| t.clone())
+                            .unwrap_or(Ty::Unknown);
+                        (p, sp, fty)
+                    })
+                    .collect();
+                self.test_seq(parts, success, fail)?;
+            }
+            HPattern::Struct { name, fields } => {
+                // An enum struct-variant (`Shape.Rect { width, height }`); the
+                // plain-struct destructure on a `Ty::Struct` is deferred.
+                let variant = name.rsplit('.').next().unwrap_or(name.as_str());
+                let (vidx, payload) = self.switch_variant(place, ty, variant, fail)?;
+                for (fname, bid) in fields {
+                    let fidx = payload
+                        .iter()
+                        .position(|(n, _)| n.as_deref() == Some(fname.as_str()))
+                        .ok_or_else(|| format!("variant `{}` has no field `{}`", variant, fname))?;
+                    let mut sp = place.clone();
+                    sp.proj.push(Projection::Downcast(vidx));
+                    sp.proj.push(Projection::Field(fidx));
+                    self.bind_place(*bid, &sp, &payload[fidx].1);
+                }
+                self.b.set_term(self.cur, Terminator::Goto(success));
+            }
+            HPattern::Or(alts) => {
+                // Try each alternative; a failed one falls to the next, the last
+                // to `fail`. Each alternative routes its own success to `success`.
+                let mut entry = self.cur;
+                let n = alts.len();
+                for (i, alt) in alts.iter().enumerate() {
+                    let next_alt = if i + 1 == n { fail } else { self.b.new_block() };
+                    self.cur = entry;
+                    self.test_pattern(alt, place, ty, success, next_alt)?;
+                    entry = next_alt;
+                }
+            }
+            HPattern::Nil => {
+                return Err(
+                    "nil/union pattern not lowered yet (needs union representation, Phase 6)"
+                        .into(),
+                );
+            }
+            HPattern::List { .. } => {
+                return Err("list pattern not lowered yet (needs the runtime, Phase 6)".into());
+            }
+            HPattern::Typed { .. } => {
+                return Err("typed (union-narrowing) pattern not lowered yet (Phase 6)".into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Test a sequence of sub-patterns (tuple elements / variant payload) in
+    /// order: each that matches flows to the next, the last to `success`; any
+    /// failure flows to `fail`.
+    fn test_seq(
+        &mut self,
+        parts: Vec<(&HPattern, Place, Ty)>,
+        success: BlockId,
+        fail: BlockId,
+    ) -> R<()> {
+        if parts.is_empty() {
+            self.b.set_term(self.cur, Terminator::Goto(success));
+            return Ok(());
+        }
+        let n = parts.len();
+        let mut entry = self.cur;
+        for (i, (sub, sp, st)) in parts.into_iter().enumerate() {
+            let this_success = if i + 1 == n {
+                success
+            } else {
+                self.b.new_block()
+            };
+            self.cur = entry;
+            self.test_pattern(sub, &sp, &st, this_success, fail)?;
+            entry = this_success;
+        }
+        Ok(())
+    }
+
+    /// `switch place { val => success, _ => fail }` over an integer/char value.
+    fn switch_eq(&mut self, place: &Place, val: i128, success: BlockId, fail: BlockId) {
+        self.b.set_term(
+            self.cur,
+            Terminator::Switch {
+                discr: Operand::Copy(place.clone()),
+                targets: vec![(val, success)],
+                default: fail,
+            },
+        );
+    }
+
+    /// Read `place`'s enum discriminant and switch on the chosen `variant`:
+    /// matching flows to a fresh block (left in `self.cur`), the default to
+    /// `fail`. Returns the variant's index and resolved payload fields so the
+    /// caller can descend into the payload via [`Projection::Downcast`].
+    fn switch_variant(
+        &mut self,
+        place: &Place,
+        ty: &Ty,
+        variant: &str,
+        fail: BlockId,
+    ) -> R<(usize, Vec<(Option<String>, Ty)>)> {
+        let ename = match ty {
+            Ty::Enum(n, _) => n.clone(),
+            _ => {
+                return Err(format!(
+                    "variant pattern `{}` on non-enum {}",
+                    variant,
+                    display_ty(ty)
+                ));
+            }
+        };
+        let (vidx, payload) = self.variant_info(&ename, ty, variant)?;
+        let disc = self.temp(Ty::Int(IntKind::I32));
+        self.emit(Statement::Assign(
+            Place::local(disc),
+            Rvalue::Discriminant(place.clone()),
+        ));
+        let matched = self.b.new_block();
+        self.b.set_term(
+            self.cur,
+            Terminator::Switch {
+                discr: Operand::Copy(Place::local(disc)),
+                targets: vec![(vidx as i128, matched)],
+                default: fail,
+            },
+        );
+        self.cur = matched;
+        Ok((vidx, payload))
+    }
+
+    /// Resolve a variant to its discriminant index and payload field types. The
+    /// built-in `Option`/`Result` (whose variants are not declared in source)
+    /// take their payload from the scrutinee's type arguments, matching the type
+    /// checker's `enum_variants_resolved`.
+    fn variant_info(
+        &self,
+        ename: &str,
+        ty: &Ty,
+        variant: &str,
+    ) -> R<(usize, Vec<(Option<String>, Ty)>)> {
+        let args: &[Ty] = match ty {
+            Ty::Enum(_, a) => a,
+            _ => &[],
+        };
+        let list: VariantList = match ename {
+            "Option" => vec![
+                ("None".into(), vec![]),
+                (
+                    "Some".into(),
+                    vec![(None, args.first().cloned().unwrap_or(Ty::Unknown))],
+                ),
+            ],
+            "Result" => vec![
+                (
+                    "Ok".into(),
+                    vec![(None, args.first().cloned().unwrap_or(Ty::Unknown))],
+                ),
+                ("Err".into(), vec![(None, Ty::Str)]),
+            ],
+            _ => self
+                .enums
+                .get(ename)
+                .cloned()
+                .ok_or_else(|| format!("unknown enum `{}`", ename))?,
+        };
+        list.iter()
+            .position(|(n, _)| n == variant)
+            .map(|i| (i, list[i].1.clone()))
+            .ok_or_else(|| format!("enum `{}` has no variant `{}`", ename, variant))
+    }
+
+    /// Bind `bid` to a fresh user local initialized from `place` (a copy for now;
+    /// MIR 3.5 refines pattern bindings to moves where the borrow check allows).
+    fn bind_place(&mut self, bid: BindingId, place: &Place, ty: &Ty) {
+        let l = self.b.new_local(ty.clone(), LocalKind::User, None);
+        self.emit(Statement::Assign(
+            Place::local(l),
+            Rvalue::Use(Operand::Copy(place.clone())),
+        ));
+        self.binding_local.insert(bid, l);
     }
 
     // -- small helpers -----------------------------------------------------

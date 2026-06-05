@@ -320,11 +320,7 @@ pub(crate) enum HPattern {
 /// Lower a checked program to HIR. Requires the [`TypeTable`] (for embedded
 /// types) and the [`crate::checker::Resolutions`] (for binding ids); both come
 /// from a clean front-end run, so lowering never has to handle errors.
-pub(crate) fn lower(
-    prog: &Program,
-    types: &TypeTable,
-    res: &crate::checker::Resolutions,
-) -> Hir {
+pub(crate) fn lower(prog: &Program, types: &TypeTable, res: &crate::checker::Resolutions) -> Hir {
     let mut lo = Lower::new(prog, types, res);
     lo.lower_program(prog)
 }
@@ -479,7 +475,9 @@ impl<'a> Lower<'a> {
                         HVariantKind::Tuple(ts.iter().map(|t| self.resolve_ty(t)).collect())
                     }
                     VariantKind::Struct(fs) => HVariantKind::Struct(
-                        fs.iter().map(|(n, t)| (n.clone(), self.resolve_ty(t))).collect(),
+                        fs.iter()
+                            .map(|(n, t)| (n.clone(), self.resolve_ty(t)))
+                            .collect(),
                     ),
                 },
             })
@@ -505,7 +503,11 @@ impl<'a> Lower<'a> {
             params.push(self.lower_param(p, owner));
         }
         let variadic = f.variadic.as_ref().map(|p| self.lower_param(p, owner));
-        let ret = f.ret.as_ref().map(|te| self.resolve_ty(te)).unwrap_or(Ty::Unit);
+        let ret = f
+            .ret
+            .as_ref()
+            .map(|te| self.resolve_ty(te))
+            .unwrap_or(Ty::Unit);
         let body = self.lower_block(&f.body);
         self.generics = saved;
         HFn {
@@ -711,7 +713,9 @@ impl<'a> Lower<'a> {
                 recv: Box::new(self.lower_expr(recv)),
                 index: Box::new(self.lower_expr(index)),
             },
-            ExprKind::Tuple(xs) => HExprKind::Tuple(xs.iter().map(|x| self.lower_expr(x)).collect()),
+            ExprKind::Tuple(xs) => {
+                HExprKind::Tuple(xs.iter().map(|x| self.lower_expr(x)).collect())
+            }
             ExprKind::List(xs) => HExprKind::List(xs.iter().map(|x| self.lower_expr(x)).collect()),
             ExprKind::Set(xs) => HExprKind::Set(xs.iter().map(|x| self.lower_expr(x)).collect()),
             ExprKind::ListRepeat { value, count } => HExprKind::ListRepeat {
@@ -797,11 +801,10 @@ impl<'a> Lower<'a> {
                     .iter()
                     .map(|p| {
                         let binding = self.declare(&p.name);
-                        let ty = p
-                            .ty
-                            .as_ref()
-                            .map(|te| self.resolve_ty(te))
-                            .unwrap_or(Ty::Unknown);
+                        let ty =
+                            p.ty.as_ref()
+                                .map(|te| self.resolve_ty(te))
+                                .unwrap_or(Ty::Unknown);
                         HParam {
                             binding,
                             name: p.name.clone(),
@@ -866,12 +869,17 @@ impl<'a> Lower<'a> {
                 hi: *hi,
                 inclusive: *inclusive,
             },
-            Pattern::Tuple(ps) => HPattern::Tuple(ps.iter().map(|p| self.lower_pattern(p)).collect()),
+            Pattern::Tuple(ps) => {
+                HPattern::Tuple(ps.iter().map(|p| self.lower_pattern(p)).collect())
+            }
             Pattern::Or(ps) => HPattern::Or(ps.iter().map(|p| self.lower_pattern(p)).collect()),
             Pattern::List { items, rest } => {
                 let items = items.iter().map(|p| self.lower_pattern(p)).collect();
                 // Resolution only declares a non-empty rest name.
-                let rest = rest.as_ref().filter(|r| !r.is_empty()).map(|r| self.declare(r));
+                let rest = rest
+                    .as_ref()
+                    .filter(|r| !r.is_empty())
+                    .map(|r| self.declare(r));
                 HPattern::List { items, rest }
             }
             Pattern::Variant { path, args } => HPattern::Variant {
@@ -880,7 +888,10 @@ impl<'a> Lower<'a> {
             },
             Pattern::Struct { name, fields } => HPattern::Struct {
                 name: name.clone(),
-                fields: fields.iter().map(|f| (f.clone(), self.declare(f))).collect(),
+                fields: fields
+                    .iter()
+                    .map(|f| (f.clone(), self.declare(f)))
+                    .collect(),
             },
             Pattern::Typed { binding, ty } => {
                 let id = self.declare(binding);
@@ -1314,9 +1325,7 @@ fn walk(e: &HExpr, bound: &mut HashSet<BindingId>, used: &mut Vec<(BindingId, Ty
             walk(start, bound, used);
             walk(end, bound, used);
         }
-        HExprKind::Closure {
-            params, body, ..
-        } => {
+        HExprKind::Closure { params, body, .. } => {
             // A nested closure's params are bound; its body's uses of *our* locals
             // are still our captures, so descend into it.
             for p in params {
@@ -1473,11 +1482,14 @@ impl TyResolver {
             }
             TypeExpr::Ref { inner, .. } => Ty::Ref(Box::new(self.resolve(inner, generics))),
             TypeExpr::Ptr { inner, .. } => Ty::Ptr(Box::new(self.resolve(inner, generics))),
-            TypeExpr::Array { inner, size } => {
-                Ty::Array(Box::new(self.resolve(inner, generics)), size.map(|s| s as usize))
-            }
+            TypeExpr::Array { inner, size } => Ty::Array(
+                Box::new(self.resolve(inner, generics)),
+                size.map(|s| s as usize),
+            ),
             TypeExpr::Slice(inner) => Ty::Slice(Box::new(self.resolve(inner, generics))),
-            TypeExpr::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.resolve(t, generics)).collect()),
+            TypeExpr::Tuple(ts) => {
+                Ty::Tuple(ts.iter().map(|t| self.resolve(t, generics)).collect())
+            }
             TypeExpr::Union(ts) => {
                 Ty::Union(ts.iter().map(|t| self.resolve(t, generics)).collect())
             }
@@ -1525,8 +1537,10 @@ impl Hir {
                         format!("({})", inner.join(", "))
                     }
                     HVariantKind::Struct(fs) => {
-                        let inner: Vec<String> =
-                            fs.iter().map(|(n, t)| format!("{}: {}", n, display_ty(t))).collect();
+                        let inner: Vec<String> = fs
+                            .iter()
+                            .map(|(n, t)| format!("{}: {}", n, display_ty(t)))
+                            .collect();
                         format!(" {{ {} }}", inner.join(", "))
                     }
                 };
@@ -1851,7 +1865,10 @@ fn pat_str(p: &HPattern) -> String {
             }
         }
         HPattern::Struct { name, fields } => {
-            let fs: Vec<String> = fields.iter().map(|(n, b)| format!("{} #{}", n, b.0)).collect();
+            let fs: Vec<String> = fields
+                .iter()
+                .map(|(n, b)| format!("{} #{}", n, b.0))
+                .collect();
             format!("{} {{ {} }}", name, fs.join(", "))
         }
         HPattern::Typed { binding, ty } => format!("#{}: {}", binding.0, display_ty(ty)),

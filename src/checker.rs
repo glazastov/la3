@@ -68,10 +68,7 @@ impl Resolutions {
         for (pos, b) in sites {
             out.push_str(&format!(
                 "  {:>4}:{:<3} {} -> #{}\n",
-                pos.line,
-                pos.col,
-                self.bindings[b.0 as usize],
-                b.0
+                pos.line, pos.col, self.bindings[b.0 as usize], b.0
             ));
         }
         out

@@ -198,8 +198,22 @@ pub(crate) fn display_ty(t: &Ty) -> String {
 pub(crate) fn ty_is_copy(t: &Ty) -> bool {
     use Ty::*;
     match t {
-        Bool | Int(_) | IntLit | Float(_) | FloatLit | Char | Unit | Never | Nil | Ref(_)
-        | Ptr(_) | Slice(_) | Range(_) | Fn(_, _) | Unknown | Param(_) => true,
+        Bool
+        | Int(_)
+        | IntLit
+        | Float(_)
+        | FloatLit
+        | Char
+        | Unit
+        | Never
+        | Nil
+        | Ref(_)
+        | Ptr(_)
+        | Slice(_)
+        | Range(_)
+        | Fn(_, _)
+        | Unknown
+        | Param(_) => true,
         Tuple(xs) => xs.iter().all(ty_is_copy),
         Array(e, _) => ty_is_copy(e),
         Str | List(_) | Map(_, _) | Set(_) | Struct(_, _) | Enum(_, _) | Future(_) | Union(_) => {

@@ -90,7 +90,10 @@ fn drop_is_transitive_through_a_nested_struct() {
     // `Outer` owns no heap directly, but its `inner: Inner` field does.
     let src = "struct Inner { s: str }\nstruct Outer { inner: Inner, n: i32 }\nfn main() { io.println(0) }";
     assert!(drop_of(src, "Inner"), "Inner owns a `str`");
-    assert!(drop_of(src, "Outer"), "Outer transitively owns Inner's `str`");
+    assert!(
+        drop_of(src, "Outer"),
+        "Outer transitively owns Inner's `str`"
+    );
 }
 
 #[test]

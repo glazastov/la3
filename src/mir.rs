@@ -20,7 +20,7 @@
 #![allow(dead_code)]
 
 use crate::ast::{BinOp, BindingId, UnOp};
-use crate::ty::{display_ty, Ty};
+use crate::ty::{Ty, display_ty};
 
 // ---------------------------------------------------------------------------
 // Program / functions / locals
@@ -153,6 +153,7 @@ pub(crate) enum Terminator {
 
 /// A memory location: a root [`Local`] plus a path of projections. `&u.name`,
 /// `a[i]`, `*p`, and an enum-variant downcast are all places.
+#[derive(Clone)]
 pub(crate) struct Place {
     pub local: Local,
     pub proj: Vec<Projection>,
@@ -167,6 +168,7 @@ impl Place {
     }
 }
 
+#[derive(Clone)]
 pub(crate) enum Projection {
     /// `.0` / `.field` — tuple or struct field by index.
     Field(usize),
@@ -211,6 +213,10 @@ pub(crate) enum Rvalue {
     Cast(Operand, Ty),
     /// `&place` / `&mut place` (mutability erased per the Phase 2 `Ty` decision).
     Ref(Place),
+    /// Read the **discriminant** (variant tag) of an enum value as an integer —
+    /// the value a `match` decision tree (3.3) switches on. The companion of
+    /// [`Projection::Downcast`], which reads a chosen variant's payload.
+    Discriminant(Place),
     /// Build an aggregate value from its fields.
     Aggregate(AggregateKind, Vec<Operand>),
 }
@@ -342,11 +348,7 @@ impl MirProgram {
                 errs.append(&mut e);
             }
         }
-        if errs.is_empty() {
-            Ok(())
-        } else {
-            Err(errs)
-        }
+        if errs.is_empty() { Ok(()) } else { Err(errs) }
     }
 }
 
@@ -431,11 +433,7 @@ impl MirFn {
             }
         }
 
-        if errs.is_empty() {
-            Ok(())
-        } else {
-            Err(errs)
-        }
+        if errs.is_empty() { Ok(()) } else { Err(errs) }
     }
 }
 
@@ -447,7 +445,10 @@ fn v_local(l: Local, n: u32, ctx: &str, errs: &mut Vec<String>) {
 
 fn v_block(b: BlockId, n: u32, ctx: &str, errs: &mut Vec<String>) {
     if b.0 >= n {
-        errs.push(format!("{}: target bb{} out of range (have {})", ctx, b.0, n));
+        errs.push(format!(
+            "{}: target bb{} out of range (have {})",
+            ctx, b.0, n
+        ));
     }
 }
 
@@ -474,7 +475,7 @@ fn v_rvalue(rv: &Rvalue, n: u32, ctx: &str, errs: &mut Vec<String>) {
             v_operand(a, n, ctx, errs);
             v_operand(b, n, ctx, errs);
         }
-        Rvalue::Ref(p) => v_place(p, n, ctx, errs),
+        Rvalue::Ref(p) | Rvalue::Discriminant(p) => v_place(p, n, ctx, errs),
         Rvalue::Aggregate(_, fields) => {
             for f in fields {
                 v_operand(f, n, ctx, errs);
@@ -524,8 +525,18 @@ impl MirFn {
                 LocalKind::User => "let",
                 LocalKind::Temp => "tmp",
             };
-            let nm = l.name.as_deref().map(|n| format!("  // {}", n)).unwrap_or_default();
-            out.push_str(&format!("    let _{}: {}; [{}]{}\n", i, display_ty(&l.ty), tag, nm));
+            let nm = l
+                .name
+                .as_deref()
+                .map(|n| format!("  // {}", n))
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "    let _{}: {}; [{}]{}\n",
+                i,
+                display_ty(&l.ty),
+                tag,
+                nm
+            ));
         }
         out.push('\n');
         for (i, b) in self.blocks.iter().enumerate() {
@@ -647,6 +658,7 @@ fn fmt_rvalue(rv: &Rvalue) -> String {
         Rvalue::Unary(op, a) => format!("{:?}({})", op, fmt_operand(a)),
         Rvalue::Cast(a, ty) => format!("{} as {}", fmt_operand(a), display_ty(ty)),
         Rvalue::Ref(p) => format!("&{}", fmt_place(p)),
+        Rvalue::Discriminant(p) => format!("discriminant({})", fmt_place(p)),
         Rvalue::Aggregate(k, fields) => {
             let fs: Vec<String> = fields.iter().map(fmt_operand).collect();
             let head = match k {
@@ -735,7 +747,9 @@ mod tests {
 
     #[test]
     fn printer_renders_signature_locals_and_block() {
-        let prog = MirProgram { fns: vec![add_fn()] };
+        let prog = MirProgram {
+            fns: vec![add_fn()],
+        };
         let dump = prog.dump();
         assert!(dump.contains("fn add(_1: i32, _2: i32) -> i32"), "{}", dump);
         assert!(dump.contains("let _0: i32; [ret]"), "{}", dump);
@@ -759,7 +773,10 @@ mod tests {
             proj: vec![Projection::Deref],
         };
         assert_eq!(fmt_place(&d), "(*_1)");
-        assert_eq!(fmt_stmt(&Statement::Drop(Place::local(Local(3)))), "drop(_3)");
+        assert_eq!(
+            fmt_stmt(&Statement::Drop(Place::local(Local(3)))),
+            "drop(_3)"
+        );
 
         let sw = Terminator::Switch {
             discr: Operand::Copy(Place::local(Local(1))),
@@ -782,7 +799,13 @@ mod tests {
     #[test]
     fn validate_accepts_a_well_formed_function() {
         assert!(add_fn().validate().is_ok());
-        assert!(MirProgram { fns: vec![add_fn()] }.validate().is_ok());
+        assert!(
+            MirProgram {
+                fns: vec![add_fn()]
+            }
+            .validate()
+            .is_ok()
+        );
     }
 
     #[test]
@@ -828,5 +851,30 @@ mod tests {
             ],
         );
         assert_eq!(fmt_rvalue(&tup), "tuple(const 1_i32, const true)");
+    }
+
+    #[test]
+    fn discriminant_rvalue_renders_and_validates() {
+        // The match-tree read primitive (3.3): `discriminant(place)`.
+        let downcast = Place {
+            local: Local(1),
+            proj: vec![Projection::Downcast(1), Projection::Field(0)],
+        };
+        assert_eq!(fmt_place(&downcast), "(_1 as variant#1).0");
+        let d = Rvalue::Discriminant(Place::local(Local(1)));
+        assert_eq!(fmt_rvalue(&d), "discriminant(_1)");
+
+        // An out-of-range place inside a Discriminant is caught by validate.
+        let mut f = add_fn();
+        f.blocks[0].stmts[0] = Statement::Assign(
+            Place::local(Local(3)),
+            Rvalue::Discriminant(Place::local(Local(99))),
+        );
+        let errs = f.validate().unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("_99 out of range")),
+            "{:?}",
+            errs
+        );
     }
 }

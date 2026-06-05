@@ -154,10 +154,8 @@ fn by_value_argument_to_a_user_fn_moves() {
 
 #[test]
 fn borrowed_argument_does_not_move() {
-    ok(
-        "fn take(x: &List<i32>) -> i32 { x.len() as i32 }\n\
-         fn main() { let a = [1, 2, 3]; let n = take(&a); io.println(a); io.println(n) }",
-    );
+    ok("fn take(x: &List<i32>) -> i32 { x.len() as i32 }\n\
+         fn main() { let a = [1, 2, 3]; let n = take(&a); io.println(a); io.println(n) }");
 }
 
 #[test]
@@ -172,11 +170,9 @@ fn consuming_method_moves_the_receiver() {
 
 #[test]
 fn ref_self_method_does_not_move_the_receiver() {
-    ok(
-        "struct B { v: List<i32> }\n\
+    ok("struct B { v: List<i32> }\n\
          impl B { fn size(&self) -> i32 { self.v.len() as i32 } }\n\
-         fn main() { let b = B { v: [1, 2] }; let n = b.size(); let m = b.size(); io.println(n + m) }",
-    );
+         fn main() { let b = B { v: [1, 2] }; let n = b.size(); let m = b.size(); io.println(n + m) }");
 }
 
 #[test]
@@ -278,7 +274,9 @@ fn two_mutable_borrows_at_once_are_rejected() {
 fn passing_a_mut_ref_directly_does_not_lock_the_value() {
     // A `&mut n` created as a call argument is a within-call borrow; after the
     // call the value is free again (the memory.la3 idiom).
-    ok("fn bump(x: &mut i32) { *x += 1 }\nfn main() { let mut n = 1; bump(&mut n); io.println(n) }");
+    ok(
+        "fn bump(x: &mut i32) { *x += 1 }\nfn main() { let mut n = 1; bump(&mut n); io.println(n) }",
+    );
 }
 
 #[test]
@@ -292,7 +290,9 @@ fn returning_a_reference_to_a_local_is_rejected() {
 #[test]
 fn a_borrow_ends_with_its_block() {
     // `r` is confined to the inner block, so `v` is free again afterward.
-    ok("fn main() { let mut v = [1, 2, 3]; { let r = &mut v; io.println(r.len()) } v.push(4); io.println(v.len()) }");
+    ok(
+        "fn main() { let mut v = [1, 2, 3]; { let r = &mut v; io.println(r.len()) } v.push(4); io.println(v.len()) }",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -302,10 +302,8 @@ fn a_borrow_ends_with_its_block() {
 #[test]
 fn borrowing_one_field_leaves_other_fields_free() {
     // `&u.name` must not lock `u.age` — they are disjoint memory.
-    ok(
-        "struct U { name: str, age: i32 }\n\
-         fn main() { let mut u = U { name: \"a\", age: 1 }; let r = &u.name; u.age = 30; io.println(r) }",
-    );
+    ok("struct U { name: str, age: i32 }\n\
+         fn main() { let mut u = U { name: \"a\", age: 1 }; let r = &u.name; u.age = 30; io.println(r) }");
 }
 
 #[test]
@@ -343,21 +341,27 @@ fn borrowing_the_whole_value_locks_every_field() {
 #[ignore = "needs NLL (borrow ends at last use) — MIR borrow-check, Phase 3.7"]
 fn nll_shared_borrow_dead_before_mutation_is_ok() {
     // `r`'s last use is `r.len()`; afterwards `v` is free to mutate.
-    ok("fn main() { let mut v = [1, 2, 3]; let r = &v; io.println(r.len()); v.push(4); io.println(v.len()) }");
+    ok(
+        "fn main() { let mut v = [1, 2, 3]; let r = &v; io.println(r.len()); v.push(4); io.println(v.len()) }",
+    );
 }
 
 #[test]
 #[ignore = "needs NLL (borrow ends at last use) — MIR borrow-check, Phase 3.7"]
 fn nll_sequential_mut_borrows_are_ok() {
     // `a` is dead after `a.push(1)`, so taking `b = &mut v` next is safe.
-    ok("fn main() { let mut v = [1, 2, 3]; let a = &mut v; a.push(1); let b = &mut v; b.push(2); io.println(v.len()) }");
+    ok(
+        "fn main() { let mut v = [1, 2, 3]; let a = &mut v; a.push(1); let b = &mut v; b.push(2); io.println(v.len()) }",
+    );
 }
 
 #[test]
 #[ignore = "needs reborrow tracking (`&mut *r`) — MIR borrow-check, Phase 3.7"]
 fn reborrow_releases_the_parent_after_use() {
     // `r2` reborrows `x` through `r1`; once `r2` is done, `r1` is usable again.
-    ok("fn main() { let mut x = 5; let r1 = &mut x; let r2 = &mut *r1; *r2 += 1; *r1 += 1; io.println(x) }");
+    ok(
+        "fn main() { let mut x = 5; let r1 = &mut x; let r2 = &mut *r1; *r2 += 1; *r1 += 1; io.println(x) }",
+    );
 }
 
 #[test]

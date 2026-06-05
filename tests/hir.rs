@@ -36,7 +36,11 @@ fn hir(src: &str) -> String {
 fn params_and_uses_become_binding_ids() {
     // `a`/`b` are bindings `#0`/`#1`; their uses are `Local(#0)`/`Local(#1)`.
     let dump = hir("fn add(a: i32, b: i32) -> i32 { a + b }");
-    assert!(dump.contains("fn add(a#0: i32, b#1: i32) -> i32"), "{}", dump);
+    assert!(
+        dump.contains("fn add(a#0: i32, b#1: i32) -> i32"),
+        "{}",
+        dump
+    );
     assert!(dump.contains("Local(#0)"), "{}", dump);
     assert!(dump.contains("Local(#1)"), "{}", dump);
 }
@@ -66,7 +70,11 @@ fn shadowing_uses_distinct_ids() {
     // The two `x` bindings get distinct ids; each use resolves to the one in scope.
     let dump = hir("fn main() { let x = 1; let y = x; let x = 2; io.println(x + y) }");
     assert!(dump.contains("let #0 : i32"), "first x is #0:\n{}", dump);
-    assert!(dump.contains("let #2 : i32"), "shadowing x is #2:\n{}", dump);
+    assert!(
+        dump.contains("let #2 : i32"),
+        "shadowing x is #2:\n{}",
+        dump
+    );
     // `let y = x` reads the first x (#0); the final `x + y` reads #2 and #1.
     assert!(dump.contains("Local(#0)"), "{}", dump);
     assert!(dump.contains("Local(#2)"), "{}", dump);
@@ -76,8 +84,16 @@ fn shadowing_uses_distinct_ids() {
 fn for_loop_binding_and_self_resolve() {
     let dump = hir("fn main() { for i in 0..3 { io.println(i) } }");
     assert!(dump.contains("pat #0"), "loop var is a binding:\n{}", dump);
-    assert!(dump.contains("Local(#0) : i32"), "use resolves to it:\n{}", dump);
-    assert!(dump.contains("Range(inclusive=false) : Range<i32>"), "{}", dump);
+    assert!(
+        dump.contains("Local(#0) : i32"),
+        "use resolves to it:\n{}",
+        dump
+    );
+    assert!(
+        dump.contains("Range(inclusive=false) : Range<i32>"),
+        "{}",
+        dump
+    );
 }
 
 #[test]
@@ -88,7 +104,11 @@ fn method_self_is_a_local_binding() {
                impl P { fn get(&self) -> i32 { self.x } }\n\
                fn main() { let p = P { x: 5 }; io.println(p.get()) }";
     let dump = hir(src);
-    assert!(dump.contains("fn P::get(self#0:"), "method owner + self:\n{}", dump);
+    assert!(
+        dump.contains("fn P::get(self#0:"),
+        "method owner + self:\n{}",
+        dump
+    );
     assert!(dump.contains("Field(x) : i32"), "{}", dump);
     assert!(dump.contains("Local(#0)"), "self use:\n{}", dump);
 }
@@ -112,7 +132,11 @@ fn match_arms_bind_and_resolve() {
     let dump = hir(src);
     assert!(dump.contains("Match :"), "{}", dump);
     // The arm binds `n` (some `#id`) and the body reads it as a local.
-    assert!(dump.contains("arm Some(#"), "variant pattern binds:\n{}", dump);
+    assert!(
+        dump.contains("arm Some(#"),
+        "variant pattern binds:\n{}",
+        dump
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -142,7 +166,11 @@ fn coalesce_desugars_to_a_nil_match() {
     assert!(!dump.contains("Coalesce"), "?? should be gone:\n{}", dump);
     assert!(dump.contains("Match :"), "{}", dump);
     assert!(dump.contains("arm nil"), "nil arm:\n{}", dump);
-    assert!(dump.contains("Str(\"x\")"), "fallback in nil arm:\n{}", dump);
+    assert!(
+        dump.contains("Str(\"x\")"),
+        "fallback in nil arm:\n{}",
+        dump
+    );
 }
 
 #[test]
@@ -153,7 +181,11 @@ fn optional_chain_desugars_to_a_nil_match() {
                fn main() {}";
     let dump = hir(src);
     assert!(dump.contains("arm nil"), "nil arm:\n{}", dump);
-    assert!(dump.contains("Field(name)"), "plain field in non-nil arm:\n{}", dump);
+    assert!(
+        dump.contains("Field(name)"),
+        "plain field in non-nil arm:\n{}",
+        dump
+    );
     // No `?.` marker remains anywhere.
     assert!(!dump.contains("?."), "optional marker gone:\n{}", dump);
 }
@@ -180,7 +212,11 @@ fn try_on_option_desugars_to_some_none_match_returning_nil() {
     assert!(dump.contains("arm None"), "None arm:\n{}", dump);
     // The None arm early-returns `nil`, not a `None` constructor.
     assert!(dump.contains("return"), "early return present:\n{}", dump);
-    assert!(!dump.contains("Global(None)"), "returns nil, not None:\n{}", dump);
+    assert!(
+        !dump.contains("Global(None)"),
+        "returns nil, not None:\n{}",
+        dump
+    );
 }
 
 #[test]
@@ -188,7 +224,11 @@ fn compound_assign_desugars_to_plain_assign_plus_binary() {
     // `n += 5` → `n = n + 5`.
     let dump = hir("fn main() { let mut n = 0; n += 5 }");
     assert!(dump.contains("Assign :"), "{}", dump);
-    assert!(dump.contains("Binary(Add) : i32"), "rebuilt operation:\n{}", dump);
+    assert!(
+        dump.contains("Binary(Add) : i32"),
+        "rebuilt operation:\n{}",
+        dump
+    );
     // The target appears on both sides (place and operand).
     let locals = dump.matches("Local(#0)").count();
     assert!(locals >= 2, "target used as place and operand:\n{}", dump);
@@ -197,8 +237,13 @@ fn compound_assign_desugars_to_plain_assign_plus_binary() {
 #[test]
 fn while_let_desugars_to_loop_match_break() {
     // `while let Some(x) = e { … }` → `loop { match e { Some(x) => …, _ => break } }`.
-    let dump = hir("fn main() { let mut xs = [1,2,3]; while let Some(x) = xs.pop() { io.println(x) } }");
-    assert!(!dump.contains("WhileLet"), "while-let should be gone:\n{}", dump);
+    let dump =
+        hir("fn main() { let mut xs = [1,2,3]; while let Some(x) = xs.pop() { io.println(x) } }");
+    assert!(
+        !dump.contains("WhileLet"),
+        "while-let should be gone:\n{}",
+        dump
+    );
     assert!(dump.contains("Loop :"), "{}", dump);
     assert!(dump.contains("arm Some(#"), "match arm binds:\n{}", dump);
     assert!(dump.contains("arm _"), "wildcard arm:\n{}", dump);
@@ -214,7 +259,11 @@ fn closure_captures_outer_local_by_ref() {
     // A plain closure borrows the free variable it uses.
     let dump = hir("fn main() { let base = 10; let f = |x| x + base; io.println(f(5)) }");
     assert!(dump.contains("Closure(move=false)"), "{}", dump);
-    assert!(dump.contains("captures(& #0: i32)"), "by-ref capture of base:\n{}", dump);
+    assert!(
+        dump.contains("captures(& #0: i32)"),
+        "by-ref capture of base:\n{}",
+        dump
+    );
 }
 
 #[test]
@@ -222,7 +271,11 @@ fn move_closure_captures_by_value() {
     // `move` transfers ownership of the captured (non-Copy) value.
     let dump = hir("fn main() { let s = \"hi\"; let f = move || s; io.println(f()) }");
     assert!(dump.contains("Closure(move=true)"), "{}", dump);
-    assert!(dump.contains("captures(move #0: str)"), "by-value capture of s:\n{}", dump);
+    assert!(
+        dump.contains("captures(move #0: str)"),
+        "by-value capture of s:\n{}",
+        dump
+    );
 }
 
 #[test]
@@ -236,14 +289,19 @@ fn closure_param_shadowing_outer_is_not_captured() {
     // The closure's own `x` (a param) must not be treated as a capture of the
     // outer `x`; they are distinct bindings.
     let dump = hir("fn main() { let x = 1; let f = |x| x + 1; io.println(x + f(2)) }");
-    assert!(dump.contains("captures()"), "param shadows, nothing captured:\n{}", dump);
+    assert!(
+        dump.contains("captures()"),
+        "param shadows, nothing captured:\n{}",
+        dump
+    );
 }
 
 #[test]
 fn nested_closure_propagates_capture_outward() {
     // The inner `|| n` captures `n`; the outer closure must also capture `n` to
     // supply it, but not the inner-bound `g`.
-    let dump = hir("fn main() { let n = 3; let outer = || { let g = || n; g() }; io.println(outer()) }");
+    let dump =
+        hir("fn main() { let n = 3; let outer = || { let g = || n; g() }; io.println(outer()) }");
     // `n` is #0; both closures capture it.
     let caps = dump.matches("captures(& #0: i32)").count();
     assert!(caps >= 2, "outer and inner both capture n:\n{}", dump);
