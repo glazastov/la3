@@ -1,0 +1,6 @@
+# Point `llvm-sys` (pulled in by `inkwell`, Phase 5.1) at the LLVM 18 install so
+# a plain `cargo build`/`cargo test` works without exporting this by hand. LLVM
+# 18 lives at /usr/lib/llvm-18 (not on PATH); the env var name encodes the
+# major.minor (18.1) llvm-sys is built against. See CLAUDE.md → "LLVM".
+[env]
+LLVM_SYS_181_PREFIX = "/usr/lib/llvm-18"

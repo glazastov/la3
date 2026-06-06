@@ -12,6 +12,7 @@
 mod ast;
 mod borrowck;
 mod checker;
+mod codegen;
 mod diag;
 mod hir;
 mod interp;

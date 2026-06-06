@@ -14,6 +14,13 @@ readme = "README.md"
 name = "la3"
 path = "src/main.rs"
 
+[dependencies]
+# LLVM back-end (Phase 5). `llvm18-1` matches the installed LLVM 18.1.x (env
+# `LLVM_SYS_181_PREFIX`, set in .cargo/config.toml). `-prefer-dynamic` links the
+# shared `libLLVM-18.so` rather than the static component libs, because this
+# apt LLVM 18 ships no static `libPolly` (which static linking would demand).
+inkwell = { version = "0.9", features = ["llvm18-1-prefer-dynamic"] }
+
 [profile.release]
 opt-level = 3
 lto = true

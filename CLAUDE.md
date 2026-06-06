@@ -40,9 +40,13 @@ interpreter (same stdout/exit code).
 ## LLVM (from Phase 5 on)
 
 - LLVM 18 is installed at `/usr/lib/llvm-18` (not on `PATH`).
-- `inkwell` needs: feature `llvm18-0` and env `LLVM_SYS_181_PREFIX=/usr/lib/llvm-18`.
-- `inkwell` is intentionally **not** a dependency yet (keeps the build green); it
-  is added in Phase 5.1.
+- `inkwell` 0.9 is a dependency as of Phase 5.1, with feature
+  **`llvm18-1-prefer-dynamic`** (the `llvm18-1` name matches LLVM 18.1.x;
+  `-prefer-dynamic` links the shared `libLLVM-18.so`, because this apt LLVM 18
+  ships no static `libPolly` that static linking would demand).
+- The env var `LLVM_SYS_181_PREFIX=/usr/lib/llvm-18` is set in
+  **`.cargo/config.toml`** (`[env]`), so a plain `cargo build`/`cargo test`
+  finds LLVM without exporting anything by hand.
 
 ## Architecture (target)
 
