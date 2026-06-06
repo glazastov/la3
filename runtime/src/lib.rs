@@ -22,8 +22,13 @@
 
 #![allow(dead_code)]
 
+pub mod bytes;
 pub mod collections;
 pub mod fmt;
+pub mod fs;
+pub mod io;
+pub mod math;
+pub mod os;
 pub mod str;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
