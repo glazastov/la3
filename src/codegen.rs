@@ -126,10 +126,11 @@ pub fn link_executable(obj: &Path, out_bin: &Path, runtime_dir: &Path) -> Result
 
 // ===========================================================================
 // MIR → LLVM IR translation (Phase 5.2: functions, params, return, scalars,
-// arithmetic — exact semantics). Control flow (`if`/`switch`), aggregates,
-// references, and the runtime/heap calls are later subparts; a MIR function
-// that uses them is reported as *skipped* (mirroring how `mirgen` bails), never
-// mis-translated.
+// arithmetic; Phase 5.3: control flow — the `if`/`switch` CFG branches, with
+// loop-carried values flowing through the per-local `alloca`s, so no φ-nodes are
+// needed). Aggregates, references, and the runtime/heap calls are later
+// subparts; a MIR function that uses them is reported as *skipped* (mirroring
+// how `mirgen` bails), never mis-translated.
 // ===========================================================================
 
 use std::collections::HashMap;
@@ -304,14 +305,17 @@ fn unsupported_reason(f: &MirFn) -> Option<String> {
             }
         }
         match &b.term {
-            Terminator::Return | Terminator::Goto(_) | Terminator::Unreachable => {}
+            // `If`/`Switch` are the MIR CFG's branches (Phase 5.3); `Goto` and
+            // `Return` close blocks; `Unreachable` ends a diverging path.
+            Terminator::Return
+            | Terminator::Goto(_)
+            | Terminator::Unreachable
+            | Terminator::If { .. }
+            | Terminator::Switch { .. } => {}
             Terminator::Call { func, .. } => {
                 if !matches!(func, Operand::Const(Const::Fn(_))) {
                     return Some("indirect call (closure/fn value) — Phase 8".into());
                 }
-            }
-            Terminator::If { .. } | Terminator::Switch { .. } => {
-                return Some("control flow (if/switch) — Phase 5.3".into());
             }
         }
     }
@@ -466,8 +470,48 @@ impl<'a, 'ctx> FnGen<'a, 'ctx> {
                     self.b(self.builder.build_unreachable())?;
                 }
             }
-            Terminator::If { .. } | Terminator::Switch { .. } => {
-                return Err("control flow survived to codegen (Phase 5.3)".into());
+            Terminator::If {
+                cond,
+                then_blk,
+                else_blk,
+            } => {
+                let c = self
+                    .gen_operand(cond, &Ty::Bool)?
+                    .ok_or("unit operand as `if` condition")?;
+                self.b(self.builder.build_conditional_branch(
+                    c.into_int_value(),
+                    self.blocks[then_blk.0 as usize],
+                    self.blocks[else_blk.0 as usize],
+                ))?;
+            }
+            Terminator::Switch {
+                discr,
+                targets,
+                default,
+            } => {
+                // The discriminant is an integer/char/bool value (enum-discriminant
+                // switches go through `Rvalue::Discriminant`, still Phase 5.4). Each
+                // arm value is a constant of the discriminant's type.
+                let dty = self.operand_ty(discr).unwrap_or(Ty::Int(IntKind::I64));
+                let dv = self
+                    .gen_operand(discr, &dty)?
+                    .ok_or("unit operand as switch discriminant")?
+                    .into_int_value();
+                let int_ty = dv.get_type();
+                let cases: Vec<_> = targets
+                    .iter()
+                    .map(|(v, b)| {
+                        (
+                            int_ty.const_int(*v as i64 as u64, false),
+                            self.blocks[b.0 as usize],
+                        )
+                    })
+                    .collect();
+                self.b(self.builder.build_switch(
+                    dv,
+                    self.blocks[default.0 as usize],
+                    &cases,
+                ))?;
             }
         }
         Ok(())
@@ -988,13 +1032,86 @@ mod tests {
     }
 
     #[test]
-    fn control_flow_function_is_skipped_not_miscompiled() {
+    fn out_of_scope_function_is_skipped_not_miscompiled() {
+        // A `str`-returning function is still beyond scalar codegen (Phase 5.4+),
+        // so it must be reported skipped rather than mis-translated.
         let ctx = Context::create();
-        let mir = lower_to_mir("fn m(a: i32) -> i32 { if a > 0 { 1 } else { 0 } }\nfn main() {}");
+        let mir = lower_to_mir("fn s() -> str { \"hi\" }\nfn main() {}");
         let (_module, skipped) = build_program_module(&ctx, &mir).expect("build module");
         assert!(
-            skipped.iter().any(|(sym, reason)| sym == "m" && reason.contains("control flow")),
-            "control-flow fn `m` reported skipped: {skipped:?}"
+            skipped.iter().any(|(sym, reason)| sym == "s" && reason.contains("non-scalar")),
+            "str-returning fn `s` reported skipped: {skipped:?}"
         );
+    }
+
+    // -- Phase 5.3: control flow from the MIR CFG (if/switch, loops, break-value).
+
+    #[test]
+    fn recursion_and_if_expression() {
+        let ctx = Context::create();
+        let ee = jit(
+            &ctx,
+            "fn fib(n: i64) -> i64 { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }\n\
+             fn main() {}",
+        );
+        unsafe {
+            let fib: JitFunction<unsafe extern "C" fn(i64) -> i64> =
+                ee.get_function("fib").unwrap();
+            assert_eq!(fib.call(0), 0);
+            assert_eq!(fib.call(1), 1);
+            assert_eq!(fib.call(10), 55);
+        }
+    }
+
+    #[test]
+    fn for_loop_and_while_loop() {
+        let ctx = Context::create();
+        let ee = jit(
+            &ctx,
+            "fn sum(n: i32) -> i32 { let mut acc = 0; for i in 1..=n { acc = acc + i }; acc }\n\
+             fn count_down(n: i32) -> i32 { let mut x = n; let mut steps = 0; \
+                 while x > 0 { x = x - 1; steps = steps + 1 }; steps }\n\
+             fn main() {}",
+        );
+        unsafe {
+            let sum: JitFunction<unsafe extern "C" fn(i32) -> i32> = ee.get_function("sum").unwrap();
+            assert_eq!(sum.call(100), 5050); // 1..=100
+            let cd: JitFunction<unsafe extern "C" fn(i32) -> i32> =
+                ee.get_function("count_down").unwrap();
+            assert_eq!(cd.call(7), 7);
+        }
+    }
+
+    #[test]
+    fn loop_break_with_value() {
+        let ctx = Context::create();
+        let ee = jit(
+            &ctx,
+            "fn first(n: i32) -> i32 { let mut i = 0; loop { if i >= n { break i } i = i + 1 } }\n\
+             fn main() {}",
+        );
+        unsafe {
+            let first: JitFunction<unsafe extern "C" fn(i32) -> i32> =
+                ee.get_function("first").unwrap();
+            assert_eq!(first.call(5), 5);
+            assert_eq!(first.call(0), 0);
+        }
+    }
+
+    #[test]
+    fn integer_match_lowers_to_branches() {
+        let ctx = Context::create();
+        let ee = jit(
+            &ctx,
+            "fn classify(n: i32) -> i32 { match n { 0 => 100, 1 => 200, _ => 999 } }\n\
+             fn main() {}",
+        );
+        unsafe {
+            let c: JitFunction<unsafe extern "C" fn(i32) -> i32> =
+                ee.get_function("classify").unwrap();
+            assert_eq!(c.call(0), 100);
+            assert_eq!(c.call(1), 200);
+            assert_eq!(c.call(7), 999);
+        }
     }
 }
