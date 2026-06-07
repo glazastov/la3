@@ -327,18 +327,18 @@ fn borrowing_the_whole_value_locks_every_field() {
 }
 
 // ---------------------------------------------------------------------------
-// Deferred to MIR (Phase 3.7) — NLL & reborrows.
+// Deferred to MIR (Phase 3.6) — NLL & reborrows.
 //
 // These assert the *correct* (Rust-accurate) behaviour: the code below is
 // memory-safe and a precise borrow checker accepts it. The current AST pass is a
 // sound lexical over-approximation, so it (wrongly) rejects them today — hence
 // `#[ignore]`. Run `cargo test -- --ignored` to watch them fail now; when the
-// MIR-based borrow check lands (Phase 3.7), delete the `#[ignore]` and they go
+// MIR-based borrow check lands (Phase 3.6), delete the `#[ignore]` and they go
 // green. They must NEVER be weakened to pass early.
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "needs NLL (borrow ends at last use) — MIR borrow-check, Phase 3.7"]
+#[ignore = "needs NLL (borrow ends at last use) — MIR borrow-check, Phase 3.6"]
 fn nll_shared_borrow_dead_before_mutation_is_ok() {
     // `r`'s last use is `r.len()`; afterwards `v` is free to mutate.
     ok(
@@ -347,7 +347,7 @@ fn nll_shared_borrow_dead_before_mutation_is_ok() {
 }
 
 #[test]
-#[ignore = "needs NLL (borrow ends at last use) — MIR borrow-check, Phase 3.7"]
+#[ignore = "needs NLL (borrow ends at last use) — MIR borrow-check, Phase 3.6"]
 fn nll_sequential_mut_borrows_are_ok() {
     // `a` is dead after `a.push(1)`, so taking `b = &mut v` next is safe.
     ok(
@@ -356,7 +356,7 @@ fn nll_sequential_mut_borrows_are_ok() {
 }
 
 #[test]
-#[ignore = "needs reborrow tracking (`&mut *r`) — MIR borrow-check, Phase 3.7"]
+#[ignore = "needs reborrow tracking (`&mut *r`) — MIR borrow-check, Phase 3.6"]
 fn reborrow_releases_the_parent_after_use() {
     // `r2` reborrows `x` through `r1`; once `r2` is done, `r1` is usable again.
     ok(

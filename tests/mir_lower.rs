@@ -333,6 +333,48 @@ fn match_with_an_unsupported_pattern_still_bails_honestly() {
     assert!(!dump.contains("invalid MIR"), "{}", dump);
 }
 
+// ---------------------------------------------------------------------------
+// Deferred to later work — features that should eventually lower cleanly, but
+// do not yet. These stay `#[ignore]`; if run early, they fail explicitly with
+// the current skip reason.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore = "needs collection iteration lowering"]
+fn for_over_a_list_lowers_once_collection_iteration_lands() {
+    let dump = mir("fn main() { for x in [1, 2, 3] { io.println(x) } }");
+    assert!(
+        !dump.contains("skipped"),
+        "must lower once collection iteration is supported:\n{}",
+        dump
+    );
+    assert!(!dump.contains("invalid MIR"), "{}", dump);
+}
+
+#[test]
+#[ignore = "needs nil/union pattern lowering"]
+fn match_on_nil_union_lowers_once_union_patterns_land() {
+    let dump = mir("fn f(x: i64 | nil) -> i64 { match x { nil => 0, n => n } }");
+    assert!(
+        !dump.contains("skipped"),
+        "must lower once nil/union patterns are supported:\n{}",
+        dump
+    );
+    assert!(!dump.contains("invalid MIR"), "{}", dump);
+}
+
+#[test]
+#[ignore = "needs async/spawn MIR lowering"]
+fn spawn_block_lowers_once_async_and_concurrency_land() {
+    let dump = mir("fn main() { let h = spawn { 6 * 7 } }");
+    assert!(
+        !dump.contains("skipped"),
+        "must lower once async/spawn lowering is supported:\n{}",
+        dump
+    );
+    assert!(!dump.contains("invalid MIR"), "{}", dump);
+}
+
 // -- closure conversion (Phase 3.4) ---------------------------------------
 
 #[test]
