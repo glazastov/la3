@@ -7,7 +7,8 @@
 //!   la3 tokens <file.la3>  print the token stream (debugging)
 //!   la3 types <file.la3>   print the inferred type of every expression (debugging)
 //!   la3 layout <file.la3>  print the by-value byte layout of structs and enums (debugging)
-//!   la3 build <file.la3>   compile to a native binary (WIP, see COMPILER_PLAN.md)
+//!   la3 build <file.la3> -o <bin>   compile to a native binary (scalar/aggregate
+//!                                    programs; str/io/collections are Phase 6)
 
 mod ast;
 mod borrowck;
@@ -186,15 +187,17 @@ fn main() {
                 prog_args = &prog_args[1..];
             }
             interp.set_args(prog_args.to_vec());
-            if let Err(d) = interp.run(&prog) {
-                fail(&d, path, &src);
+            match interp.run(&prog) {
+                // An integer `main` return becomes the process exit status (the
+                // OS truncates to the low 8 bits, as for a C `main`); any other
+                // return (unit/`nil`/…) is a successful exit 0.
+                Ok(interp::Value::Int(n)) => exit(n as i32),
+                Ok(_) => {}
+                Err(d) => fail(&d, path, &src),
             }
         }
         "build" => {
-            // Front-end is shared with the interpreter: parse, then run the
-            // checker. Codegen itself lands in Phase 5 (see COMPILER_PLAN.md);
-            // for now `build` proves the front-end accepts the program and
-            // reports that the LLVM backend is not wired yet.
+            // Front-end is shared with the interpreter: parse, then check.
             let prog = match parser::parse(&src) {
                 Ok(p) => p,
                 Err(d) => fail(&d, path, &src),
@@ -206,12 +209,47 @@ fn main() {
                 }
                 exit(1);
             }
-            eprintln!(
-                "la3: front-end OK for {}; native codegen is not implemented yet \
-                 (LLVM backend lands in Phase 5 — see COMPILER_PLAN.md)",
-                path
+            // Output path: `-o <file>` after the source, else the source stem in
+            // the current directory.
+            let mut out = std::path::PathBuf::from(
+                std::path::Path::new(path)
+                    .file_stem()
+                    .map(|s| s.to_os_string())
+                    .unwrap_or_else(|| "a.out".into()),
             );
-            exit(3);
+            let extra = &args[3..];
+            if let Some(i) = extra.iter().position(|a| a == "-o") {
+                if let Some(p) = extra.get(i + 1) {
+                    out = std::path::PathBuf::from(p);
+                }
+            }
+
+            // Lower to MIR and hand it to the LLVM back-end.
+            let res = checker::resolve(&prog);
+            let table = typeck::check_types(&prog);
+            let hir = hir::lower(&prog, &table, &res);
+            let mir = mirgen::lower(&hir).program;
+            let oracle = typeck::layout_oracle(&prog);
+            match codegen::compile_executable(&mir, &oracle, &out) {
+                Ok(true) => {
+                    println!("la3: wrote {}", out.display());
+                }
+                // The program uses features the back-end can't lower yet
+                // (`str`/`io`/collections/refs — Phase 6). Report codegen-pending
+                // (exit 3) so the differential harness skips it for now.
+                Ok(false) => {
+                    eprintln!(
+                        "la3: {} uses features the native back-end does not lower yet \
+                         (str/io/collections/refs — Phase 6); codegen pending",
+                        path
+                    );
+                    exit(3);
+                }
+                Err(e) => {
+                    eprintln!("la3: codegen failed for {}: {}", path, e);
+                    exit(1);
+                }
+            }
         }
         other => {
             eprintln!("la3: unknown command '{}'", other);

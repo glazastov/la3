@@ -94,6 +94,14 @@ keep the **driver/link step (11.1)** mode-aware. The mechanism itself is **Phase
 
 - `[ ]` not started · `[~]` in progress · `[x]` done and verified (build+test+verify)
 - A phase is only "done" when **all** its subparts are `[x]` and the user has approved.
+- **Milestone invariant (added 2026-06-07, after the 5.5 audit).** A milestone subpart
+  may **only require features implemented at or before its own phase**. Whole-program
+  example milestones are therefore homed at the **earliest phase that completes _all_ the
+  example's features** — never at the phase that merely showcases one of them. (The
+  examples are holistic; the phases are feature-sliced, so the naïve "this example shows
+  off feature X ⇒ put it in feature X's phase" placement creates forward dependencies — a
+  phase silently needing a later one. That is the bug this invariant prevents; see the
+  2026-06-07 audit in the Progress log for the cases it fixed.)
 
 ---
 
@@ -256,7 +264,7 @@ The native runtime compiled code links against (ownership model: owned values +
 - [x] 4.4 `extern "C"` stdlib (subset) — five new runtime modules, each an island (the à-la-carte invariant), mirroring the interpreter oracle (`call_module` in `src/interp/builtins.rs`): **`math`** (`la3_math_{floor,ceil,round,abs,sqrt,log,log2,sin,cos}`, `f64→f64`; `log`=natural log; `pi`/`e`/`inf` are codegen-inlined immediates, no symbol); **`io`** (`la3_io_{print,println,eprintln}(*const La3Str)` — borrow, never free, since built-ins borrow their args); **`os`** (`la3_os_exit(i32)->!`, `la3_os_args()->La3List` of `La3Str` from `argv[1..]`, `la3_os_env(key,*out)->bool` for `Option<str>`); **`fs`** (`la3_fs_read`/`la3_fs_write`, error shape `"{path}: {err}"`); **`bytes`** (`la3_bytes_to_hex(ptr,len)->str`). Cross-checked **byte-identically against the running interpreter** (round half-away `3.0`/`-3.0`, natural-log `1.0`, hex `000fffa5`, fs error message). Battery: 10 `#[cfg(test)]` tests across the five modules; runtime stays **Miri-clean** (34 tests, isolation disabled for the `fs`/`os` real-I/O tests). No codegen yet, so verified standalone (differential testing lands in Phase 5).
   > **Decisions (2026-06-06).** (1) **Aggregate-return ABI for `Result`/`Option`** uses the codegen-neutral **`bool` + out-parameter** idiom (`la3_fs_read(path,*out)->bool`, `la3_os_env(key,*out)->bool`): the runtime returns the tag + writes the `str` payload through `out`, and the codegen assembles the `Result<str>`/`Option<str>` from them — so the runtime never pins the tagged-union *layout* (that is the codegen's call, Phase 5/6). `os.args` instead returns a concrete `La3List` by value (a `List<str>` needs no enum layout). (2) **`json` deferred** — `encode`/`pretty` take `any` (recursive, type-directed rendering) and `decode::<T>` is generic over `T`'s layout; both are the same `any`/aggregate-rendering class Phase 4.3 deferred to the codegen (Phase 5/6), so there is nothing the runtime can mirror standalone yet. (3) **`bytes.from_hex`/`from_base64` deferred** (return `Result<List<u8>>` — aggregate); `to_base64`/`compare` skipped (no interpreter oracle to differentially test against). (4) **`os.args` = `argv[1..]`** (`std::env::args().skip(1)`), matching the interpreter, which exposes the args *after* the program name.
 
-## Phase 5 — LLVM codegen (MIR → IR) · STATUS: [~] 5.1–5.4 done; 5.5 (milestone) next — in progress
+## Phase 5 — LLVM codegen (MIR → IR) · STATUS: [x] done (awaiting review)
 
 Thin, mechanical translation of MIR to LLVM IR — no language logic here.
 
@@ -264,16 +272,70 @@ Thin, mechanical translation of MIR to LLVM IR — no language logic here.
 - [x] 5.2 Functions, params, return, scalars, arithmetic (exact semantics) — `codegen::build_program_module` lowers a `MirProgram` to an LLVM module: each `MirFn` becomes an LLVM function (scalar params, `void` for a unit return), locals are stack `alloca`s (alloca-per-local, load/store, like `clang -O0` — SSA/`mem2reg` is left to LLVM's own pass later), and the value layer is translated mechanically — `Operand`/`Const`, `Rvalue::{Use,Binary,Unary,Cast}`, and the `Return`/`Goto`/`Call`/`Unreachable` terminators (direct calls resolve by the `owner::name`/free-name symbol). **Exact semantics, mirroring the interpreter oracle:** integer `/` truncates toward zero (`sdiv`/`udiv` by signedness), `%` takes the left sign (`srem`/`urem`), `<<`/`>>` use `ashr`/`lshr` by signedness, `**` always yields `f64` (operands converted, `libm pow`), float→int casts truncate toward zero, and int↔int casts sign/zero-extend by the **source** signedness. A two-pass fixpoint marks functions out of 5.2 scope (control flow, aggregates, refs, heap/runtime calls, indirect calls) as **skipped** rather than mis-translating them. Battery: 7 `#[cfg(test)]` tests in `codegen.rs` that lower La3 source → MIR → LLVM and **execute it via the LLVM JIT**, asserting exact results (division/remainder signs, `udiv`, float+`**`, casts, bitwise/shift, a bool-returning comparison, a cross-function call) + a guard that a control-flow function is reported skipped. **Decision (2026-06-06):** integer arithmetic is compiled **width-exact** (LLVM ops at the local's int type, 2's-complement wrapping; unsigned ops for unsigned kinds) — the reference-intended exact-width semantics (Pillar 1, bare-metal). The interpreter computes all int math in `i64`, so the two **only diverge at narrow-width overflow**, which no example/test exercises (the compiler is the *more* correct of the two here). Div/rem-by-zero trapping is deferred (needs a branch+abort → Phase 5.3 control flow); no test divides by zero.
 - [x] 5.3 Control flow from the MIR CFG; `break with value`/`return` — `gen_term` now translates the two CFG-branch terminators it previously bailed on: `Terminator::If` → `build_conditional_branch` on the `bool` (i1) condition, `Terminator::Switch` → `build_switch` (each arm value a constant of the discriminant's integer type). Because every La3 control form (`if`-expr, `while`, `for`-over-range, `loop`, `break`/`break value`, `continue`, `return`) is **already a CFG of `Goto`/`If`/`Switch` + temps in MIR (mirgen, 3.2/3.3)**, this is all codegen needs: `break value` is just an assignment to the loop's result temp followed by a `Goto`, and **loop-carried values flow through the per-local `alloca`s, so no φ-nodes are required** (LLVM's `mem2reg` can promote them later). Integer/`char` `match` (literal arms → `Switch`) now lowers; enum `match` still bails (it needs `Rvalue::Discriminant` + `Downcast`, Phase 5.4). Battery: 4 new `#[cfg(test)]` JIT tests in `codegen.rs` (recursion + `if`-expression via `fib`; `for`/`while` loops; `loop { … break i }`; integer `match`), and the former "control-flow is skipped" guard repurposed to a still-out-of-scope `str`-returning function. Div/rem-by-zero trapping (which now *could* use a branch) stays deferred — no example/test divides by zero, and it is a runtime-error-semantics concern, not core control flow.
 - [x] 5.4 Structs by value; enums as tagged unions; the lowered match trees — codegen now translates aggregates end-to-end. A new **`LayoutOracle`** (`typeck::layout`) is the single source of truth the back-end queries for memory layout: `size_align`, `agg_fields` (`(offset, Ty)` per struct/tuple field), `variant_index`, and `enum_info` (tag + per-variant payload layout). Structs/tuples lower to LLVM aggregates built field-by-field through `Rvalue::Aggregate` + `Projection::Field` (GEP/store, load on read); enums lower to a **tagged union** `{ i32 tag, [N x i8] payload }` — construction writes the tag and bit-casts the payload slot to the variant's struct type, `Rvalue::Discriminant` reads the tag, and `Projection::Downcast` reinterprets the payload for the matched variant, so the 3.3 decision-tree `Switch`es from mirgen lower directly. Enum **values pass by value** (the `{tag,payload}` struct is copied through args/returns/`alloca`s — no aggregate-ABI indirection needed at these sizes). `infer_local_types` was extended to thread the oracle so constructor-temp locals (and `Call`-terminator dests) get their concrete aggregate `Ty` in the two-pass fixpoint, and enum-constructor **calls are recognized and built inline** (mirgen lowers `Enum.Variant(x)` as a `call Enum.Variant(…)` terminator, which has no real callee — codegen materializes the variant instead). Battery: 4 new `#[cfg(test)]` JIT tests in `codegen.rs` (tuple build+field read; struct build+field read; enum construct → pass by value → match; enum built+matched within one function). **Front-end fix made here (root-caused via the interpreter oracle):** `Enum.Variant(args)` parses as a *method call* (`recv = Enum`, `method = Variant`), and `typeck::infer_method` had no enum-construction branch, so the whole expression typed `Unknown` — which made an *unannotated* `let s = if … { Shape.Circle(a) } else { … }` lose its type and mirgen bail on the match. Added the missing branch (mirroring `type_member`): an `Ident` receiver naming an in-scope-free enum with a matching variant types as `Ty::Enum` and pins the payload literals against the variant's declared field types. The interpreter always accepted this program (`25.0 12.0`); the compiler now does too, with no annotation. **Scope/deferred:** the JIT battery covers structs, tuples, and **tuple-variant** enums (construct → pass-by-value → match); struct-variant enum construction is layout-generic in the build path (`enum_info` computes its payload like any other) but is **not yet exercised by a test** here. The `build` command stays at exit 3 (CODEGEN_PENDING) — end-to-end binary differential testing is the 5.5 milestone; 5.4 verifies by JIT-executing the compiled code and asserting exact values that match the interpreter (`Shape.Circle(5)→25.0`, `Shape.Rect(3,4)→12.0`, cross-checked against `la3 run`).
-- [ ] 5.5 **Milestone**: `fizzbuzz.la3`, `fib.la3`, `shapes.la3` compile and match the interpreter
+- [x] 5.5 **Milestone (re-scoped 2026-06-07)**: the `build` command is wired to the real
+      pipeline — `compile_executable` runs `build_executable_module` (the translated MIR
+      functions + a synthesized C `i32 @main()` entry that calls the renamed `la3_main` and
+      returns its exit code) → `write_module_object` → `link_executable` against
+      `la3_runtime` (found next to the `la3` binary) → a native binary at `-o`. A
+      scalar/aggregate program is **differential-tested end-to-end** against the interpreter
+      via the **process exit code**: an integer `main` return is the exit status in both the
+      interpreter (`interp::run` now returns `main`'s value; `src/main.rs` exits with it) and
+      the compiled binary (the C entry). This is the whole of Phase 5's end-to-end proof,
+      because **everything Phase 5 lowers is scalar/aggregate-by-value with no runtime/heap**
+      — no `str`, `io`, f-string `Format`, or collections, which are Phase 6. A program that
+      uses those (every bundled example) is reported **codegen-pending** (exit 3) and skipped
+      by the harness, not mis-built. Also hardened the skip-predicate: a `str`/global-value
+      (`math.pi`) **operand** now skips its function cleanly instead of hard-erroring in
+      pass 3 (this is why `shapes` previously crashed `build`). Battery: 3 new end-to-end
+      tests in `tests/differential.rs` (scalar control-flow `gcd`→exit 12; struct+tuple
+      aggregate→33; tuple-variant enum construct+match→42), plus the existing example sweep
+      (all 13 skip cleanly).
+      > **Why re-scoped (audit 2026-06-07).** The old 5.5 — "`fizzbuzz`/`fib`/`shapes`
+      > compile and match" — was a **forward dependency**: all three print via `io.println`
+      > + f-strings, so every `main` (and `fizzbuzz::classify`, which returns `str`) needs
+      > `str`/`io`/`Format` codegen, which the plan files under **Phase 6**; `shapes` also
+      > needs list literals + methods + struct-variant construction. Those three example
+      > milestones moved to Phase 6 (fib/fizzbuzz/shapes) under the new milestone invariant.
 
-## Phase 6 — References, raw pointers, unsafe · STATUS: [ ]
+## Phase 6 — Runtime-backed codegen: strings, collections, references, pointers · STATUS: [ ]
 
-Codegen for the memory features (the _checking_ is Phase 1.6; the _lowering_ is MIR 3.5).
+Codegen for the runtime-backed values (`str`, `io`, f-string `Format`, collections) and
+the memory features (the _checking_ is Phase 1.6; the _lowering_ is MIR 3.5). This is
+where the milestone examples that **print** finally run, so the Phase-5 `fib`/`fizzbuzz`/
+`shapes` milestones live here (re-homed 2026-06-07 — see the milestone invariant). The
+runtime they link against already exists (Phase 4: `str`, collections, `fmt`, `io`,
+`math`, …).
 
-- [ ] 6.1 `List`/`Map`/`Set`/`str` codegen against the runtime
-- [ ] 6.2 `&T`/`&mut T` (safe refs); `*r`/`*r = v`
-- [ ] 6.3 `*T`/`*mut T`, `&raw`, `sizeof(T)`-scaled arithmetic, `unsafe`, `alloc`/`dealloc`
-- [ ] 6.4 **Milestone**: `collections`, `memory`, `tls_record`, `word_count`
+- [ ] 6.1 **`str` + `io` + f-string `Format` + `str()` codegen against the runtime** — `str`
+      as a value (the 3-word `La3Str`), string literals → `la3_str_from_utf8`, `+` →
+      `la3_str_concat`, drop glue → `la3_str_drop`, `==`/`str`-match → `la3_str_eq`; the HIR
+      `Format{value,spec}` primitive → the typed `la3_fmt_*` calls (with the `:spec`); the
+      `io.*` module calls → `la3_io_*`; the `str(x)` conversion; and `math.pi`/`e`/`inf`
+      inlined as immediates. **Milestone:** `fib.la3` and `fizzbuzz.la3` compile to a native
+      binary and **match the interpreter** (both need only scalars + `str`/`io`/`Format` —
+      no collections), differential-tested end-to-end.
+- [ ] 6.2 **`List`/`Map`/`Set` codegen against the runtime** — heap-collection literals
+      (`[…]`, `{…}`) → `la3_{list,map,set}_new` + element pushes (with the per-element
+      size/align + drop-glue/eq fn-pointers the runtime ABI wants), built-in methods
+      (`push`/`get`/`insert`/`contains`/`len`/…), `for`-over-collection (the per-kind step
+      mirgen left typed), `[]` indexing, and **struct-variant construction** (`E.V { … }` —
+      the latent mirgen gap noted in 5.4) + aggregate display in f-strings. **Milestone:**
+      `shapes.la3` compiles and matches the interpreter (it uses a `List<Shape>` literal,
+      `for`-over-list, methods, a struct-variant, and `math.pi`; **no** generics/closures).
+- [ ] 6.3 `&T`/`&mut T` (safe refs); `*r`/`*r = v` — the `Rvalue::Ref` / `Projection::Deref`
+      forms MIR 3.5 already emits (mutability erased to a plain pointer).
+- [ ] 6.4 `*T`/`*mut T`, `&raw`, `sizeof(T)`-scaled arithmetic, `unsafe`, `alloc`/`dealloc`,
+      and array (`[T;N]`) indexing (`Projection::Index`). **Milestone:** `memory.la3`
+      compiles and matches the interpreter (safe `&mut`, a raw pointer into an array with
+      element-scaled arithmetic, and manual `alloc`/`dealloc`).
+
+> **Deferred to the Phase 11.2 conformance gate (not Phase 6):** `collections`,
+> `word_count`, `tls_record`. Each forward-depends on later phases — `collections`/
+> `word_count` on **generics (7)** + **closures/higher-order (8)** (`.map`/`.filter`/
+> `.reduce`/`.sort_by`) + **errors (9)** (`?`), and `tls_record` on **errors (9)** — so by
+> the milestone invariant they cannot be Phase-6 milestones. They become whole-program
+> differential tests in 11.2 once those features land. (Hybrid placement, user decision
+> 2026-06-07.)
 
 ## Phase 7 — Generics & interfaces · STATUS: [ ]
 
@@ -305,7 +367,10 @@ monomorphization included (moved here from MIR 3.2 on 2026-06-04; it is still a
 ## Phase 11 — Driver & quality · STATUS: [ ]
 
 - [ ] 11.1 Pipeline: object → link runtime → executable; `-O` flags, target
-- [ ] 11.2 Conformance: interp×compiled differential over all `examples/` + `tests/`
+- [ ] 11.2 Conformance: interp×compiled differential over all `examples/` + `tests/` —
+      including the whole-program examples re-homed here on 2026-06-07 because they span
+      generics + closures + errors: **`collections`, `word_count`, `tls_record`** (each
+      green only once Phases 7–9 are in)
 - [ ] 11.3 Golden IR tests; (future) DWARF debug info
 
 ## Phase 12 — À-la-carte dynamic stdlib · STATUS: [ ] ← Pillar 2; no rush, do it _well_
@@ -385,3 +450,5 @@ are pinned so the eventual design is chosen deliberately, not by accident.**
 - 2026-06-05 — **Phase 3.4 done.** Closure conversion in `mirgen`: each `Closure` HIR node is **lifted** into a synthetic top-level MIR function (`{parent}::{{closure#n}}`, names nest for nested closures) taking the captured env as its first parameter (a tuple) plus the closure's own params; at the site a `{fn ptr, env}` value is **materialized** as a new `Rvalue::Aggregate(AggregateKind::Closure(sym), [captures])`. The Phase 2.5 `HCapture` list decides capture mode — by-ref → `&place` in the env (read via `(*_1.i)`), `move`/by-value → the value (read via `_1.i`) — and captures resolve through a `capture_place` map (checked before `binding_local`). Calling *through* a closure value (env-passing ABI) is deferred to Phase 8: indirect calls bail honestly. Verified by-ref/`move`/no-capture/nested conversions and the direct-call bail on synthetic `xs.map(|x| …)` programs; no example produces invalid MIR; interpreter oracle unchanged (`collections` runs identically). Added `AggregateKind::Closure` to `mir.rs`. 191 tests pass (+5) + 3 ignored, 0 warnings. **Remaining Phase 3:** 3.5 ownership lowering, 3.6 NLL/reborrow. Awaiting review before 3.5.
 - 2026-06-05 — **Phase 3.3 done.** New `mirgen::lower_match` lowers `match` into a sequential decision tree (oracle-faithful: top-to-bottom, first match wins): literal/`char`/`bool` → `Switch`/`If`, ranges → chained `Ge`/`Le`, `str` → `Eq`, tuples → field projections + nested switches, enum variants (tuple **and** struct-variant) → a new `Rvalue::Discriminant` + `Switch` + `Downcast` payload binding; guards route a failure to the next arm, or-patterns emit one `Switch` per alternative, `@`/wildcard/bare-binding handled; exhaustive fall-through is `Unreachable`. Built-in `Option`/`Result` keep the layout's canonical discriminant order. Unsupported patterns (`list`, `nil`/union, typed) **bail honestly** (skipped, not mis-lowered). Added `Rvalue::Discriminant` + `#[derive(Clone)]` on `Place`/`Projection` to `mir.rs`, and fixed an incidental 3.2 gap (module-constant field `math.pi` → qualified global value) so the milestone target lowers. **Milestone:** `fizzbuzz::classify` + `shapes::area` lower to valid MIR; `la3 mir` produces zero invalid MIR across all examples; interpreter oracle unchanged (`fizzbuzz`/`shapes` outputs identical). 186 tests pass (+11) + 3 ignored, 0 warnings. **Phase 3.3 is the last of fib/fizzbuzz/shapes-by-match; remaining Phase 3 subparts: 3.4 closures, 3.5 ownership lowering, 3.6 NLL/reborrow.** Awaiting review before 3.4.
 - 2026-06-02 — **Phase 2.2 done.** Name resolution now assigns a unique `BindingId` (new in `ast.rs`) to every value binding site and maps each local `Ident`/`self` use → its binding, with scopes as `Vec<HashMap<String, BindingId>>`. Shadowing is resolved here, once (proven by `la3 resolve` on `let x; let y=x; let x`: the two uses of `x` target `#0` vs `#2`). Globals/builtins still resolve by name (no id). New `checker::resolve(prog) -> Resolutions` (used by `check`), debug command `la3 resolve`, and battery `tests/resolve.rs` (6 tests). 134 tests pass + 3 ignored, 0 warnings. Sets up HIR (2.3) to be `BindingId`-based. Awaiting review before 2.3.
+- 2026-06-07 — **Plan audit: forward-dependency sweep + 5.5/Phase-6 reorder (user decision).** While picking up 5.5, found its milestone (`fib`/`fizzbuzz`/`shapes` "compile and match") was a **forward dependency**: all three print via `io.println` + f-strings, so every `main` (and `fizzbuzz::classify`, returning `str`) needs `str`/`io`/`Format` codegen — which the plan files under **Phase 6**; codegen's `ty_unsupported` rejects every `str` local today (verified by probe: fib→`main` skipped, fizzbuzz→`classify`+`main` skipped, shapes→hard-errors on a `str` constant). Swept every phase for the same bug and found a **bigger** one: Phase 6.4's milestone (`collections`/`word_count`/`tls_record`) needs **generics (7)** + **closures/higher-order (8)** (`.map`/`.filter`/`.reduce`/`.sort_by`) + **errors (9)** (`?`). Root cause: examples are holistic, phases are feature-sliced, so an example placed by "which feature it showcases" lands before its last-needed feature. **Fix:** added the **milestone invariant** (a milestone may only require features at/before its phase) and re-homed every whole-program milestone to its earliest valid phase — **5.5** re-scoped to wiring `build`→object→link→binary + a scalar/aggregate end-to-end diff-test; **Phase 6** retitled "Runtime-backed codegen" and split into 6.1 (`str`/`io`/`Format`/`str()`/`math` consts → **fib+fizzbuzz** milestone), 6.2 (`List`/`Map`/`Set` + `for`-over-collection + struct-variant construction → **shapes** milestone), 6.3 (safe refs), 6.4 (raw pointers/`unsafe`/array index → **memory** milestone); **collections/word_count/tls_record** deferred to the **11.2** conformance gate (hybrid placement). Also logged the latent gap: struct-variant **construction** (`E.V { … }`) is unimplemented in mirgen (noted in 5.4) and now scheduled in 6.2. No code change — plan-only restructuring. Phase 3.6's earlier block is the same class of issue, already parked.
+- 2026-06-07 — **Phase 5.5 done → Phase 5 complete.** Wired `build` to the real back-end. New `codegen::compile_executable` drives `build_executable_module` → `write_module_object` → `link_executable`: `build_executable_module` translates the MIR (`build_program_module`) then, if La3 `main` compiled, renames it `la3_main` and synthesizes a C `i32 @main()` entry that calls it and returns the exit code (integer `main` → that value normalized to i32; unit `main` → 0). The runtime staticlib is located next to the running `la3` binary (`target/<profile>/`). The `build` command parses `-o <bin>`, lowers HIR→MIR, and on success writes the binary; a program whose `main` uses features the back-end can't lower yet (`str`/`io`/collections/refs — Phase 6) returns `entry_ok=false` → exit **3** (codegen-pending), which the differential harness skips. **Exit-code semantics (decision, reference is silent):** an integer `main` return is the process exit status in *both* the interpreter (`interp::run` now returns `main`'s `Value`; `src/main.rs` calls `process::exit` with it) and the compiled binary; unit/other → 0. **Hardened the skip-predicate** (`unsupported_reason` now scans operands): a `str` literal or a global-value reference like `math.pi` (lowered as `Const::Fn`) used as a *value* operand skips its function cleanly instead of hard-erroring in pass 3 — the bug that made `build examples/shapes.la3` crash. Verified: `gcd(48,60)` compiles and the binary exits 12, byte-identical to `la3 run`; all 13 examples report codegen-pending and skip (no example mis-builds or errors). Battery: 3 end-to-end differential tests (`tests/differential.rs`: scalar control-flow, struct+tuple aggregate, tuple-variant enum) + the example sweep. README + `build` help updated. Workspace **252 pass** (+3) + 3 ignored, **0 warnings**; interpreter oracle behaviour unchanged for non-integer-returning `main`. **Phase 5 (LLVM codegen) is complete** — 5.1 scaffold, 5.2 scalars/arithmetic, 5.3 control flow, 5.4 aggregates/enums, 5.5 end-to-end `build`. Next is **Phase 6.1** (`str`/`io`/`Format` codegen → the fib/fizzbuzz milestone). Awaiting review before Phase 6.

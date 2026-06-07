@@ -263,19 +263,21 @@ impl Interp {
         self.args = args;
     }
 
-    /// Load all items, then call `main` if present.
-    pub fn run(&mut self, prog: &Program) -> DResult<()> {
+    /// Load all items, then call `main` if present. Returns `main`'s value (or
+    /// `Value::Nil` when there is no `main` or it produced no value) so the CLI
+    /// can map an integer return to the process exit code (see `src/main.rs`).
+    pub fn run(&mut self, prog: &Program) -> DResult<Value> {
         self.load(prog);
         let result = if lookup(&self.globals, "main").is_some() {
             let main = lookup(&self.globals, "main").unwrap();
             let f = main.borrow().clone();
             match self.call_value(f, vec![], Pos::default()) {
-                Ok(_) => Ok(()),
+                Ok(v) => Ok(v),
                 Err(Signal::Error(d)) => Err(d),
-                Err(_) => Ok(()),
+                Err(_) => Ok(Value::Nil),
             }
         } else {
-            Ok(())
+            Ok(Value::Nil)
         };
         // Run any spawned tasks that were never joined, so fire-and-forget side
         // effects (e.g. a `spawn` that only prints) still happen.
