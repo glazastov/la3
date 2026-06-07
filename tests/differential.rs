@@ -114,8 +114,13 @@ fn compiled_matches_interpreter() {
     }
 
     eprintln!("differential: {compared} compared, {skipped} skipped (codegen pending)");
-    // While the backend is unimplemented, every example is skipped; that is the
-    // expected Phase 0 state, not a failure.
+    // As of Phase 6.1, `fib` and `fizzbuzz` compile and are compared here (they
+    // use only scalars + `str`/`io`/`Format`); the rest still skip pending their
+    // features (collections/refs/errors).
+    assert!(
+        compared >= 2,
+        "expected fib + fizzbuzz to compile and be compared, only {compared} were"
+    );
 }
 
 // -- Phase 5.5 milestone: scalar/aggregate programs compile to a native binary
@@ -189,5 +194,42 @@ fn enum_tagged_union_program_matches() {
         "enum Op { Add(i32, i32), Neg(i32) }\n\
          fn eval(o: Op) -> i32 { match o { Op.Add(a, b) => a + b, Op.Neg(a) => 0 - a } }\n\
          fn main() -> i32 { eval(Op.Add(40, 2)) }\n", // 42
+    );
+}
+
+// -- Phase 6.1: `str` / `io` / f-string `Format` / `str()` compile and match the
+// interpreter end-to-end (stdout is the observable, via `io.println`).
+
+#[test]
+fn str_literal_concat_and_println_matches() {
+    assert_compiled_matches(
+        "str_concat",
+        "fn main() { let a = \"foo\"; let b = \"bar\"; io.println(a + b) }\n",
+    );
+}
+
+#[test]
+fn fstring_int_and_float_formatting_matches() {
+    // Default rendering of an integer and a float through the f-string `Format`
+    // primitive (→ `la3_fmt_i64`/`la3_fmt_f64`), byte-identical to the interpreter.
+    assert_compiled_matches(
+        "fstring",
+        "fn main() {\n\
+             let n = 42\n\
+             let x = 1.5\n\
+             io.println(f\"n={n} x={x} sum={n + 8}\")\n\
+         }\n",
+    );
+}
+
+#[test]
+fn str_conversion_and_math_const_matches() {
+    // `str(x)` over an int and a float, plus an inlined `math.pi` immediate.
+    assert_compiled_matches(
+        "str_conv",
+        "fn main() {\n\
+             io.println(str(7) + \"/\" + str(8))\n\
+             io.println(f\"pi≈{math.pi}\")\n\
+         }\n",
     );
 }

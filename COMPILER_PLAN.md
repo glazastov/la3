@@ -297,7 +297,7 @@ Thin, mechanical translation of MIR to LLVM IR — no language logic here.
       > needs list literals + methods + struct-variant construction. Those three example
       > milestones moved to Phase 6 (fib/fizzbuzz/shapes) under the new milestone invariant.
 
-## Phase 6 — Runtime-backed codegen: strings, collections, references, pointers · STATUS: [ ]
+## Phase 6 — Runtime-backed codegen: strings, collections, references, pointers · STATUS: [~] 6.1 done; 6.2 next
 
 Codegen for the runtime-backed values (`str`, `io`, f-string `Format`, collections) and
 the memory features (the _checking_ is Phase 1.6; the _lowering_ is MIR 3.5). This is
@@ -306,14 +306,40 @@ where the milestone examples that **print** finally run, so the Phase-5 `fib`/`f
 runtime they link against already exists (Phase 4: `str`, collections, `fmt`, `io`,
 `math`, …).
 
-- [ ] 6.1 **`str` + `io` + f-string `Format` + `str()` codegen against the runtime** — `str`
-      as a value (the 3-word `La3Str`), string literals → `la3_str_from_utf8`, `+` →
-      `la3_str_concat`, drop glue → `la3_str_drop`, `==`/`str`-match → `la3_str_eq`; the HIR
-      `Format{value,spec}` primitive → the typed `la3_fmt_*` calls (with the `:spec`); the
-      `io.*` module calls → `la3_io_*`; the `str(x)` conversion; and `math.pi`/`e`/`inf`
-      inlined as immediates. **Milestone:** `fib.la3` and `fizzbuzz.la3` compile to a native
-      binary and **match the interpreter** (both need only scalars + `str`/`io`/`Format` —
-      no collections), differential-tested end-to-end.
+- [x] 6.1 **`str` + `io` + f-string `Format` + `str()` codegen against the runtime** — `str`
+      is the 3-word `La3Str` held **by value** (24B/align 8), modeled codegen-locally
+      (`storage_ty`/`is_str`); string literals → `la3_str_from_utf8`, `+` → `la3_str_concat`,
+      a `Drop` of a `str` → `la3_str_drop`; the HIR `Format{value,spec}` primitive and `str(x)`
+      → the typed `la3_fmt_{i64,u64,f64,bool,char,str}` (default spec for these); `io.print`/
+      `println`/`eprintln` → `la3_io_*`; `math.pi`/`e`/`inf` inline as f64 immediates. The
+      skip-predicate now lets `str`/`math`-const functions through, and `call_targets` treats
+      the `la3_*` calls as runtime-resolved (no false skip). **Milestone met:** `fib.la3` and
+      `fizzbuzz.la3` compile to native binaries and match the interpreter **byte-for-byte**
+      (stdout + exit), differential-tested end-to-end. Battery: the two examples now compared
+      by the harness + 3 focused end-to-end tests (`str` concat/`println`; int+float f-string
+      formatting; `str()` + `math.pi`) in `tests/differential.rs`, and 1 `build_program_module`
+      unit test (`str`-returning fn is supported).
+      > **Decisions / scope (recorded 2026-06-07).**
+      > 1. **str = 24-byte `La3Str` by value** (reference is ambiguous; the realized runtime
+      >    4.1 decides it). The `LayoutOracle` still reports the heap types as an 8-byte handle
+      >    (a placeholder); 6.1 overrides `str` **codegen-locally**, which is sound here because
+      >    the milestone never embeds a `str` in an aggregate (such functions stay skipped via
+      >    `ty_unsupported`). **Reconciling the oracle** (str = 24, and `List`/`Map`/`Set` to
+      >    their real runtime sizes) so heap values can live inside aggregates is **6.2**.
+      > 2. **Explicit sret for `str`-returning runtime fns.** LLVM does **not** implement the C
+      >    ABI for by-value aggregate returns, so declaring `la3_str_from_utf8`/`concat`/`fmt_*`
+      >    as returning `{ptr,i64,i64}` mismatches Rust's `-> La3Str` (shifted args → segfault,
+      >    found in testing). They are declared `void(ptr out, …)` with an explicit out-pointer
+      >    first arg (= the sret register on x86_64 SysV).
+      > 3. **Call-argument int-width coercion.** Lenient inference lets an `i32` (e.g. a
+      >    `0..10` loop var) be passed to an `i64` parameter (the interpreter computes in `i64`
+      >    and accepts it); codegen sign/zero-extends the argument to the parameter width to
+      >    match (`coerce_int_arg`). A latent 5.x gap exposed once `fib`/`fizzbuzz` `main` compiled.
+      > 4. **Deferred to 6.2:** `str` **comparison** (`==`/`str`-match → `la3_str_eq`, needs
+      >    literal-operand materialization; such functions skip cleanly for now), aggregate
+      >    display in f-strings, and `Format` **specs** (`:.3f` etc. — `shapes`). Temporary
+      >    `str`s leak (temp-drop insertion is the deferred 3.5/3.6 CFG-dataflow work; never
+      >    double-frees, never affects output).
 - [ ] 6.2 **`List`/`Map`/`Set` codegen against the runtime** — heap-collection literals
       (`[…]`, `{…}`) → `la3_{list,map,set}_new` + element pushes (with the per-element
       size/align + drop-glue/eq fn-pointers the runtime ABI wants), built-in methods
@@ -452,3 +478,4 @@ are pinned so the eventual design is chosen deliberately, not by accident.**
 - 2026-06-02 — **Phase 2.2 done.** Name resolution now assigns a unique `BindingId` (new in `ast.rs`) to every value binding site and maps each local `Ident`/`self` use → its binding, with scopes as `Vec<HashMap<String, BindingId>>`. Shadowing is resolved here, once (proven by `la3 resolve` on `let x; let y=x; let x`: the two uses of `x` target `#0` vs `#2`). Globals/builtins still resolve by name (no id). New `checker::resolve(prog) -> Resolutions` (used by `check`), debug command `la3 resolve`, and battery `tests/resolve.rs` (6 tests). 134 tests pass + 3 ignored, 0 warnings. Sets up HIR (2.3) to be `BindingId`-based. Awaiting review before 2.3.
 - 2026-06-07 — **Plan audit: forward-dependency sweep + 5.5/Phase-6 reorder (user decision).** While picking up 5.5, found its milestone (`fib`/`fizzbuzz`/`shapes` "compile and match") was a **forward dependency**: all three print via `io.println` + f-strings, so every `main` (and `fizzbuzz::classify`, returning `str`) needs `str`/`io`/`Format` codegen — which the plan files under **Phase 6**; codegen's `ty_unsupported` rejects every `str` local today (verified by probe: fib→`main` skipped, fizzbuzz→`classify`+`main` skipped, shapes→hard-errors on a `str` constant). Swept every phase for the same bug and found a **bigger** one: Phase 6.4's milestone (`collections`/`word_count`/`tls_record`) needs **generics (7)** + **closures/higher-order (8)** (`.map`/`.filter`/`.reduce`/`.sort_by`) + **errors (9)** (`?`). Root cause: examples are holistic, phases are feature-sliced, so an example placed by "which feature it showcases" lands before its last-needed feature. **Fix:** added the **milestone invariant** (a milestone may only require features at/before its phase) and re-homed every whole-program milestone to its earliest valid phase — **5.5** re-scoped to wiring `build`→object→link→binary + a scalar/aggregate end-to-end diff-test; **Phase 6** retitled "Runtime-backed codegen" and split into 6.1 (`str`/`io`/`Format`/`str()`/`math` consts → **fib+fizzbuzz** milestone), 6.2 (`List`/`Map`/`Set` + `for`-over-collection + struct-variant construction → **shapes** milestone), 6.3 (safe refs), 6.4 (raw pointers/`unsafe`/array index → **memory** milestone); **collections/word_count/tls_record** deferred to the **11.2** conformance gate (hybrid placement). Also logged the latent gap: struct-variant **construction** (`E.V { … }`) is unimplemented in mirgen (noted in 5.4) and now scheduled in 6.2. No code change — plan-only restructuring. Phase 3.6's earlier block is the same class of issue, already parked.
 - 2026-06-07 — **Phase 5.5 done → Phase 5 complete.** Wired `build` to the real back-end. New `codegen::compile_executable` drives `build_executable_module` → `write_module_object` → `link_executable`: `build_executable_module` translates the MIR (`build_program_module`) then, if La3 `main` compiled, renames it `la3_main` and synthesizes a C `i32 @main()` entry that calls it and returns the exit code (integer `main` → that value normalized to i32; unit `main` → 0). The runtime staticlib is located next to the running `la3` binary (`target/<profile>/`). The `build` command parses `-o <bin>`, lowers HIR→MIR, and on success writes the binary; a program whose `main` uses features the back-end can't lower yet (`str`/`io`/collections/refs — Phase 6) returns `entry_ok=false` → exit **3** (codegen-pending), which the differential harness skips. **Exit-code semantics (decision, reference is silent):** an integer `main` return is the process exit status in *both* the interpreter (`interp::run` now returns `main`'s `Value`; `src/main.rs` calls `process::exit` with it) and the compiled binary; unit/other → 0. **Hardened the skip-predicate** (`unsupported_reason` now scans operands): a `str` literal or a global-value reference like `math.pi` (lowered as `Const::Fn`) used as a *value* operand skips its function cleanly instead of hard-erroring in pass 3 — the bug that made `build examples/shapes.la3` crash. Verified: `gcd(48,60)` compiles and the binary exits 12, byte-identical to `la3 run`; all 13 examples report codegen-pending and skip (no example mis-builds or errors). Battery: 3 end-to-end differential tests (`tests/differential.rs`: scalar control-flow, struct+tuple aggregate, tuple-variant enum) + the example sweep. README + `build` help updated. Workspace **252 pass** (+3) + 3 ignored, **0 warnings**; interpreter oracle behaviour unchanged for non-integer-returning `main`. **Phase 5 (LLVM codegen) is complete** — 5.1 scaffold, 5.2 scalars/arithmetic, 5.3 control flow, 5.4 aggregates/enums, 5.5 end-to-end `build`. Next is **Phase 6.1** (`str`/`io`/`Format` codegen → the fib/fizzbuzz milestone). Awaiting review before Phase 6.
+- 2026-06-07 — **Phase 6.1 done.** `str`/`io`/f-string `Format`/`str()`/`math`-const codegen against the runtime. `str` is the runtime's 3-word `La3Str` held **by value** (24B, align 8), modeled codegen-locally (`storage_ty`/`is_str`, `STR_SIZE`/`STR_ALIGN`); string literals lower via `la3_str_from_utf8`, `+` via `la3_str_concat`, a MIR `Drop` of a `str` via `la3_str_drop`, and the `Format{value,spec}` primitive / `str(x)` via the typed `la3_fmt_{i64,u64,f64,bool,char,str}` (selected by the value's type); `io.*` → `la3_io_*`; `math.pi`/`e`/`inf` inline as f64 immediates (matching the interpreter's `module_const`). The skip-predicate now admits `str`/`math`-const functions, and runtime calls (`io.*`/`std::format`/`str`) are resolved directly rather than counted as unknown callees. **Three bugs found and fixed during bring-up:** (1) **explicit sret** — LLVM doesn't implement the C aggregate-return ABI, so a `{ptr,i64,i64}` by-value return mismatched Rust's `-> La3Str` (shifted args → segfault); declared the str-returning fns `void(ptr out, …)` instead; (2) **call-arg int-width coercion** — lenient inference passes an `i32` loop var to fib's `i64` param (the interpreter computes in i64 and accepts it), so codegen now sign/zero-extends arguments to the parameter width (`coerce_int_arg`); (3) string-literal operands in `+`/format are materialized into a temp `str` (`str_ptr`). **Milestone met:** `fib.la3` and `fizzbuzz.la3` compile to native binaries and match the interpreter **byte-for-byte** (stdout + exit 0), differential-tested end-to-end. **Deferred to 6.2 (recorded):** oracle heap-layout reconciliation (so str/collections can sit inside aggregates), `str` comparison (`la3_str_eq` + literal materialization → such functions skip cleanly), aggregate f-string display, and `Format` specs (`:.3f`). Temp `str`s leak (temp-drop is the deferred 3.5/3.6 CFG work; never double-frees). Battery: `fib`/`fizzbuzz` now compared by `tests/differential.rs` + 3 focused end-to-end tests (str concat/println; int+float f-string; `str()`+`math.pi`) + 1 unit test; updated the stale `out_of_scope` codegen test to use a `&mut` param. README + `build` help updated. Workspace **256 pass** (+4) + 3 ignored, **0 warnings**; interpreter oracle unchanged. **Remaining Phase 6:** 6.2 collections (+ oracle reconciliation, str compare, specs → `shapes` milestone), 6.3 safe refs, 6.4 raw pointers (→ `memory` milestone). Awaiting review before 6.2.

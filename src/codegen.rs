@@ -143,11 +143,57 @@ pub fn link_executable(obj: &Path, out_bin: &Path, runtime_dir: &Path) -> Result
 use std::collections::HashMap;
 
 use inkwell::builder::Builder;
-use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, IntType};
+use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, IntType, StructType};
 use inkwell::values::{
-    BasicMetadataValueEnum, BasicValueEnum, FloatValue, FunctionValue, PointerValue,
+    BasicMetadataValueEnum, BasicValueEnum, FloatValue, FunctionValue, IntValue, PointerValue,
 };
-use inkwell::{FloatPredicate, IntPredicate};
+use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
+
+/// `str` is the runtime's owned `La3Str { ptr, len, cap }` — three machine words
+/// (24 bytes, align 8) held **by value**, matching the realized runtime (Phase
+/// 4.1: "the codegen moves by copying the three words"). Phase 6.1 models it
+/// codegen-locally; the `LayoutOracle` still reports the heap types as a single
+/// pointer (a placeholder), which is fine here because the milestone never embeds
+/// a `str` in an aggregate (such functions stay skipped). Reconciling the oracle
+/// (str = 24, and `List`/`Map`/`Set` to their real sizes) so heap values can live
+/// inside aggregates is Phase 6.2.
+const STR_SIZE: u64 = 24;
+const STR_ALIGN: u64 = 8;
+
+/// The LLVM type mirroring the runtime `La3Str` (`{ ptr, i64, i64 }`), used for
+/// `str`-typed local storage. A `str`-returning runtime function (`from_utf8`,
+/// `concat`, `fmt_*`) does **not** return this by value: LLVM does not implement
+/// the C ABI for aggregate returns (it would mismatch Rust's sret `-> La3Str`),
+/// so those are declared `void(ptr out, …)` and write through an explicit
+/// out-pointer (which on x86_64 SysV is exactly the sret register, `rdi`).
+fn str_struct_ty(ctx: &Context) -> StructType<'_> {
+    let ptr = ctx.ptr_type(AddressSpace::default());
+    let i64t = ctx.i64_type();
+    ctx.struct_type(&[ptr.into(), i64t.into(), i64t.into()], false)
+}
+
+fn is_str(ty: &Ty) -> bool {
+    matches!(ty, Ty::Str)
+}
+
+/// The numeric value of an inlined `math` constant (`math.pi`/`e`/`inf`), matching
+/// the interpreter's `module_const` exactly.
+fn math_const(name: &str) -> Option<f64> {
+    match name {
+        "math.pi" => Some(std::f64::consts::PI),
+        "math.e" => Some(std::f64::consts::E),
+        "math.inf" => Some(f64::INFINITY),
+        _ => None,
+    }
+}
+
+/// Runtime/stdlib call symbols the back-end lowers directly to `la3_*` ABI calls
+/// (Phase 6.1): f-string formatting / `str(x)` and the `io` writers.
+fn is_runtime_call(name: &str) -> bool {
+    name == "std::format"
+        || name == "str"
+        || matches!(name, "io.print" | "io.println" | "io.eprintln")
+}
 
 use crate::ast::{BinOp, UnOp};
 use crate::mir::{
@@ -408,6 +454,10 @@ fn storage_ty<'ctx>(
     if matches!(ty, Ty::Unit) {
         return None;
     }
+    // `str` is the runtime `La3Str` struct, held by value (Phase 6.1).
+    if is_str(ty) {
+        return Some(str_struct_ty(ctx).into());
+    }
     // Aggregate: opaque byte storage of the by-value size.
     let (size, _) = oracle.size_align(ty)?;
     Some(ctx.i8_type().array_type(size as u32).into())
@@ -434,6 +484,15 @@ fn unsupported_reason(f: &MirFn, oracle: &LayoutOracle) -> Option<String> {
             return Some(format!("local _{i}: {r}"));
         }
     }
+    // Is this operand a `str` value? (str isn't an aggregate, so only bare
+    // locals or string literals.)
+    let op_is_str = |op: &Operand| match op {
+        Operand::Copy(p) | Operand::Move(p) if p.proj.is_empty() => {
+            is_str(&tys[p.local.0 as usize])
+        }
+        Operand::Const(Const::Str(_)) => true,
+        _ => false,
+    };
     for b in &f.blocks {
         for s in &b.stmts {
             if let Statement::Assign(p, rv) = s {
@@ -443,10 +502,23 @@ fn unsupported_reason(f: &MirFn, oracle: &LayoutOracle) -> Option<String> {
                 if let Some(r) = rvalue_unsupported(rv) {
                     return Some(r);
                 }
-                // A string literal or a global-value reference (`math.pi`, a free
-                // fn used as a value) is not scalar codegen yet (Phase 6.1). Catch
-                // it as an *operand* so the function is cleanly skipped rather than
-                // hard-erroring deep in pass 3.
+                // `str` *comparison* (`==`/`<`/…, e.g. a `str` match arm) needs
+                // `la3_str_eq` plus materializing literal operands — deferred to
+                // Phase 6.2 (with collections); skip such functions cleanly.
+                if let Rvalue::Binary(
+                    BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge,
+                    a,
+                    b,
+                ) = rv
+                {
+                    if op_is_str(a) || op_is_str(b) {
+                        return Some("str comparison — Phase 6.2".into());
+                    }
+                }
+                // A global-value reference (a free fn used as a value, Phase 8)
+                // as an operand: catch it here so the function is cleanly skipped
+                // rather than hard-erroring deep in pass 3. (`str` literals and
+                // `math` constants are supported, Phase 6.1.)
                 for op in rvalue_operands(rv) {
                     if let Some(r) = const_operand_unsupported(op) {
                         return Some(r);
@@ -488,14 +560,15 @@ fn rvalue_operands(rv: &Rvalue) -> Vec<&Operand> {
     }
 }
 
-/// A `str`/global-value constant used as a *value* operand is beyond scalar
-/// codegen (Phase 6.1) — return why so the function is skipped. (`Const::Fn` in
-/// a call's `func` position is fine; it is handled by the call lowering.)
+/// A global-value constant used as a *value* operand that the back-end cannot
+/// lower — a free function used as a value (closure/fn-pointer ABI, Phase 8).
+/// `str` literals and `math` constants are supported (Phase 6.1); a `Const::Fn`
+/// in a call's `func` position is handled by the call lowering, not here.
 fn const_operand_unsupported(op: &Operand) -> Option<String> {
     match op {
-        Operand::Const(Const::Str(_)) => Some("string literal — Phase 6.1".into()),
+        Operand::Const(Const::Fn(name)) if math_const(name).is_some() => None,
         Operand::Const(Const::Fn(name)) => {
-            Some(format!("global-value reference `{name}` — Phase 6.1"))
+            Some(format!("global-value reference `{name}` — Phase 8"))
         }
         _ => None,
     }
@@ -512,6 +585,10 @@ fn is_scalar(ty: &Ty) -> bool {
 /// (tuple/struct/enum whose every field/payload is a scalar).
 fn ty_unsupported(ty: &Ty, oracle: &LayoutOracle) -> Option<String> {
     if is_scalar(ty) || matches!(ty, Ty::Unit) {
+        return None;
+    }
+    // `str` is codegen-able (Phase 6.1), held by value as the runtime `La3Str`.
+    if is_str(ty) {
         return None;
     }
     match ty {
@@ -694,7 +771,7 @@ fn call_targets(f: &MirFn, oracle: &LayoutOracle) -> Vec<String> {
             ..
         } = &b.term
         {
-            if enum_ctor(name, oracle).is_none() {
+            if enum_ctor(name, oracle).is_none() && !is_runtime_call(name) {
                 out.push(name.clone());
             }
         }
@@ -775,10 +852,19 @@ impl<'a, 'ctx> FnGen<'a, 'ctx> {
 
     fn gen_block(&mut self, blk: &BasicBlock) -> Result<(), String> {
         for s in &blk.stmts {
-            if let Statement::Assign(place, rv) = s {
-                self.gen_assign(place, rv)?;
+            match s {
+                Statement::Assign(place, rv) => self.gen_assign(place, rv)?,
+                // Dropping a `str` runs its runtime drop glue (frees the buffer);
+                // scalars/flat aggregates own no heap, so their drops are no-ops.
+                Statement::Drop(p) => {
+                    if self.place_ty(p).as_ref().is_some_and(is_str) {
+                        let ptr = self.resolve_place(p)?.0;
+                        let f = self.runtime_decl("la3_str_drop");
+                        self.b(self.builder.build_call(f, &[ptr.into()], ""))?;
+                    }
+                }
+                Statement::StorageLive(_) | Statement::StorageDead(_) | Statement::Nop => {}
             }
-            // Drop / Storage* / Nop have no codegen (flat values own no heap yet).
         }
         self.gen_term(&blk.term)
     }
@@ -792,6 +878,12 @@ impl<'a, 'ctx> FnGen<'a, 'ctx> {
             return Ok(());
         }
         let (dptr, dty) = self.resolve_place(place)?;
+        // `str` destinations (literal / move / concatenation) lower against the
+        // runtime; the call-produced ones (`format`/`str(x)`) flow through the
+        // call terminator, not here.
+        if is_str(&dty) {
+            return self.gen_str_assign(dptr, rv);
+        }
         match rv {
             // Build a tuple/struct/enum value directly into the destination.
             Rvalue::Aggregate(kind, ops) => self.gen_aggregate(dptr, &dty, kind, ops),
@@ -994,6 +1086,267 @@ impl<'a, 'ctx> FnGen<'a, 'ctx> {
         self.b(unsafe { self.builder.build_in_bounds_gep(i8t, base, &[idx], "off") })
     }
 
+    // -- Phase 6.1: `str` / `io` / f-string `Format` runtime lowering ----------
+
+    /// Declare (once) a runtime `la3_*` function with its C ABI signature. A
+    /// `str`-returning function takes an explicit `out` pointer as its first
+    /// argument and returns `void` (the sret convention; see [`str_struct_ty`]).
+    fn runtime_decl(&self, name: &str) -> FunctionValue<'ctx> {
+        if let Some(f) = self.module.get_function(name) {
+            return f;
+        }
+        let ptr = self.ctx.ptr_type(AddressSpace::default());
+        let i64t = self.ctx.i64_type();
+        let void = self.ctx.void_type();
+        let ty = match name {
+            // str-returning (sret): void(out, …).
+            "la3_str_from_utf8" => void.fn_type(&[ptr.into(), ptr.into(), i64t.into()], false),
+            "la3_str_concat" => void.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+            "la3_str_drop" => void.fn_type(&[ptr.into()], false),
+            "la3_str_eq" => self.ctx.bool_type().fn_type(&[ptr.into(), ptr.into()], false),
+            "la3_io_print" | "la3_io_println" | "la3_io_eprintln" => {
+                void.fn_type(&[ptr.into()], false)
+            }
+            // la3_fmt_*(out, value, spec_ptr, spec_len) — out is the sret slot.
+            "la3_fmt_i64" | "la3_fmt_u64" => {
+                void.fn_type(&[ptr.into(), i64t.into(), ptr.into(), i64t.into()], false)
+            }
+            "la3_fmt_f64" => void.fn_type(
+                &[ptr.into(), self.ctx.f64_type().into(), ptr.into(), i64t.into()],
+                false,
+            ),
+            "la3_fmt_bool" => void.fn_type(
+                &[ptr.into(), self.ctx.bool_type().into(), ptr.into(), i64t.into()],
+                false,
+            ),
+            "la3_fmt_char" => void.fn_type(
+                &[ptr.into(), self.ctx.i32_type().into(), ptr.into(), i64t.into()],
+                false,
+            ),
+            "la3_fmt_str" => {
+                void.fn_type(&[ptr.into(), ptr.into(), ptr.into(), i64t.into()], false)
+            }
+            other => unreachable!("unknown runtime decl `{other}`"),
+        };
+        self.module.add_function(name, ty, None)
+    }
+
+    /// A pointer to a `str` operand's storage. A place yields its slot directly;
+    /// a string *literal* operand (e.g. the `"fib("` in a concatenation) is
+    /// materialized into a fresh temporary `str` first. (The temporary's buffer
+    /// leaks — temp drops are deferred with the CFG dataflow of 3.6/6.2; this
+    /// never double-frees and does not affect observable output.)
+    fn str_ptr(&mut self, op: &Operand) -> Result<PointerValue<'ctx>, String> {
+        match op {
+            Operand::Copy(p) | Operand::Move(p) => Ok(self.resolve_place(p)?.0),
+            Operand::Const(Const::Str(s)) => {
+                let slot = self.b(self.builder.build_alloca(str_struct_ty(self.ctx), "strtmp"))?;
+                self.gen_str_literal(slot, s)?;
+                Ok(slot)
+            }
+            Operand::Const(_) => Err("non-`str` constant where a `str` was expected".into()),
+        }
+    }
+
+    /// Lower a `str` destination assignment: a string literal, a move/copy, or a
+    /// `+` concatenation.
+    fn gen_str_assign(&mut self, dptr: PointerValue<'ctx>, rv: &Rvalue) -> Result<(), String> {
+        match rv {
+            Rvalue::Use(Operand::Const(Const::Str(s))) => self.gen_str_literal(dptr, s),
+            Rvalue::Use(op @ (Operand::Copy(_) | Operand::Move(_))) => {
+                let src = self.str_ptr(op)?;
+                let n = self.ctx.i64_type().const_int(STR_SIZE, false);
+                self.b(self.builder.build_memcpy(
+                    dptr,
+                    STR_ALIGN as u32,
+                    src,
+                    STR_ALIGN as u32,
+                    n,
+                ))
+                .map(|_| ())
+            }
+            Rvalue::Binary(BinOp::Add, a, b) => {
+                let ap = self.str_ptr(a)?;
+                let bp = self.str_ptr(b)?;
+                let f = self.runtime_decl("la3_str_concat");
+                self.b(self.builder.build_call(
+                    f,
+                    &[dptr.into(), ap.into(), bp.into()],
+                    "",
+                ))?;
+                Ok(())
+            }
+            _ => Err("unsupported `str` rvalue (only literal/move/concat)".into()),
+        }
+    }
+
+    /// Build a string literal into `dptr` via `la3_str_from_utf8(out, bytes, len)`.
+    fn gen_str_literal(&mut self, dptr: PointerValue<'ctx>, s: &str) -> Result<(), String> {
+        let (data, len) = self.str_bytes(s)?;
+        let f = self.runtime_decl("la3_str_from_utf8");
+        self.b(self.builder.build_call(
+            f,
+            &[dptr.into(), data.into(), len.into()],
+            "",
+        ))?;
+        Ok(())
+    }
+
+    /// A pointer to the UTF-8 bytes of `s` (a private global) plus its byte length.
+    fn str_bytes(&self, s: &str) -> Result<(PointerValue<'ctx>, IntValue<'ctx>), String> {
+        let g = self
+            .b(self.builder.build_global_string_ptr(s, "str"))?
+            .as_pointer_value();
+        let len = self.ctx.i64_type().const_int(s.len() as u64, false);
+        Ok((g, len))
+    }
+
+    /// Lower a runtime/stdlib call (`io.*`, f-string `format`, `str(x)`).
+    fn gen_runtime_call(
+        &mut self,
+        name: &str,
+        args: &[Operand],
+        dest: &Option<(Place, crate::mir::BlockId)>,
+    ) -> Result<(), String> {
+        match name {
+            "io.print" | "io.println" | "io.eprintln" => {
+                let sym = match name {
+                    "io.print" => "la3_io_print",
+                    "io.println" => "la3_io_println",
+                    _ => "la3_io_eprintln",
+                };
+                let p = self.str_ptr(&args[0])?;
+                let f = self.runtime_decl(sym);
+                self.b(self.builder.build_call(f, &[p.into()], ""))?;
+            }
+            // `format`/`str(x)`: render `args[0]` (with optional `:spec` in
+            // `args[1]`) into the destination `str`.
+            "std::format" | "str" => {
+                let (dptr, _) = self.resolve_place(
+                    &dest.as_ref().ok_or("format call without a destination")?.0,
+                )?;
+                self.gen_format(dptr, &args[0], args.get(1))?;
+            }
+            other => return Err(format!("unknown runtime call `{other}`")),
+        }
+        if let Some((_, next)) = dest {
+            self.b(self
+                .builder
+                .build_unconditional_branch(self.blocks[next.0 as usize]))?;
+        } else {
+            self.b(self.builder.build_unreachable())?;
+        }
+        Ok(())
+    }
+
+    /// Render `value` (with optional `:spec`) into the `str` at `dptr`, selecting
+    /// the typed `la3_fmt_*` by the value's type (mirroring the interpreter).
+    fn gen_format(
+        &mut self,
+        dptr: PointerValue<'ctx>,
+        value: &Operand,
+        spec: Option<&Operand>,
+    ) -> Result<(), String> {
+        let (sp, sl) = self.spec_args(spec)?;
+        let vty = self
+            .operand_ty(value)
+            .unwrap_or_else(|| if self.is_float_const(value) {
+                Ty::Float(FloatKind::F64)
+            } else {
+                Ty::Int(IntKind::I32)
+            });
+        // (runtime fn, the value argument coerced to the fn's parameter type)
+        let (sym, varg): (&str, BasicMetadataValueEnum) = match &vty {
+            Ty::Str => {
+                let p = self.str_ptr(value)?;
+                ("la3_fmt_str", p.into())
+            }
+            Ty::Float(_) | Ty::FloatLit => {
+                let v = self.to_f64(value)?;
+                ("la3_fmt_f64", v.into())
+            }
+            Ty::Bool => {
+                let v = self.gen_operand(value, &Ty::Bool)?.ok_or("unit in format")?;
+                ("la3_fmt_bool", v.into())
+            }
+            Ty::Char => {
+                let v = self.gen_operand(value, &Ty::Char)?.ok_or("unit in format")?;
+                ("la3_fmt_char", v.into())
+            }
+            Ty::Int(k) => {
+                let signed = is_signed(*k);
+                let v = self.load_int_as_i64(value, &vty, signed)?;
+                (if signed { "la3_fmt_i64" } else { "la3_fmt_u64" }, v.into())
+            }
+            _ => {
+                let v = self.load_int_as_i64(value, &Ty::Int(IntKind::I32), true)?;
+                ("la3_fmt_i64", v.into())
+            }
+        };
+        let f = self.runtime_decl(sym);
+        self.b(self.builder.build_call(
+            f,
+            &[dptr.into(), varg, sp.into(), sl.into()],
+            "",
+        ))?;
+        Ok(())
+    }
+
+    /// The `(spec_ptr, spec_len)` pair a `la3_fmt_*` call takes: the literal spec
+    /// bytes, or `(null, 0)` for the default rendering.
+    fn spec_args(
+        &self,
+        spec: Option<&Operand>,
+    ) -> Result<(PointerValue<'ctx>, IntValue<'ctx>), String> {
+        match spec {
+            Some(Operand::Const(Const::Str(s))) => self.str_bytes(s),
+            None => Ok((
+                self.ctx.ptr_type(AddressSpace::default()).const_null(),
+                self.ctx.i64_type().const_zero(),
+            )),
+            Some(_) => Err("format spec is not a string literal".into()),
+        }
+    }
+
+    /// Coerce a scalar call argument to its parameter type when lenient inference
+    /// left a different integer width (e.g. an `i32` loop variable passed to an
+    /// `i64` parameter, which the interpreter accepts since it computes in `i64`).
+    /// Match the interpreter by sign/zero-extending or truncating to the declared
+    /// width; non-int or already-matching values pass through unchanged.
+    fn coerce_int_arg(
+        &self,
+        v: BasicValueEnum<'ctx>,
+        from: Option<Ty>,
+        to: &Ty,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        if let (BasicValueEnum::IntValue(iv), Ty::Int(tk)) = (v, to) {
+            let tt = int_ty(self.ctx, *tk);
+            if iv.get_type().get_bit_width() != tt.get_bit_width() {
+                let signed = matches!(from, Some(Ty::Int(k)) if is_signed(k))
+                    || !matches!(from, Some(Ty::Int(_)));
+                return Ok(self
+                    .b(self.builder.build_int_cast_sign_flag(iv, tt, signed, "argcast"))?
+                    .into());
+            }
+        }
+        Ok(v)
+    }
+
+    /// Load an integer operand and sign/zero-extend it to `i64` (the width the
+    /// `la3_fmt_i64`/`la3_fmt_u64` formatters take).
+    fn load_int_as_i64(
+        &mut self,
+        op: &Operand,
+        ty: &Ty,
+        signed: bool,
+    ) -> Result<IntValue<'ctx>, String> {
+        let v = self.gen_operand(op, ty)?.ok_or("unit in format")?.into_int_value();
+        let i64t = self.ctx.i64_type();
+        Ok(self.b(self
+            .builder
+            .build_int_cast_sign_flag(v, i64t, signed, "toi64"))?)
+    }
+
     fn gen_term(&mut self, term: &Terminator) -> Result<(), String> {
         match term {
             Terminator::Return => {
@@ -1024,6 +1377,11 @@ impl<'a, 'ctx> FnGen<'a, 'ctx> {
                     Operand::Const(Const::Fn(n)) => n,
                     _ => return Err("indirect call survived to codegen".into()),
                 };
+                // A runtime/stdlib call (`io.*`, f-string `format`, `str(x)`) lowers
+                // to its `la3_*` ABI counterpart (Phase 6.1).
+                if is_runtime_call(name) {
+                    return self.gen_runtime_call(name, args, dest);
+                }
                 // An enum tuple-variant "constructor" (`Enum.Variant`) is lowered
                 // by mirgen as a call; build the variant aggregate inline instead.
                 if let Some((_, vidx)) = enum_ctor(name, self.oracle) {
@@ -1054,6 +1412,8 @@ impl<'a, 'ctx> FnGen<'a, 'ctx> {
                     let v = self
                         .gen_operand_full(a, &expect)?
                         .ok_or("unit-typed call argument")?;
+                    let from = self.operand_ty(a);
+                    let v = self.coerce_int_arg(v, from, &expect)?;
                     argv.push(v.into());
                 }
                 let call = self.b(self.builder.build_call(callee, &argv, "call"))?;
@@ -1202,8 +1562,12 @@ impl<'a, 'ctx> FnGen<'a, 'ctx> {
             Const::Bool(b) => self.ctx.bool_type().const_int(*b as u64, false).into(),
             Const::Char(ch) => self.ctx.i32_type().const_int(*ch as u64, false).into(),
             Const::Unit | Const::Nil => return Ok(None),
+            // A `math` constant (`math.pi`/`e`/`inf`) inlines as an f64 immediate.
+            Const::Fn(name) if math_const(name).is_some() => {
+                self.ctx.f64_type().const_float(math_const(name).unwrap()).into()
+            }
             Const::Str(_) | Const::Fn(_) => {
-                return Err("string/fn constant is not a scalar value (Phase 5.4+)".into());
+                return Err("string/fn constant is not a scalar value here".into());
             }
         };
         Ok(Some(v))
@@ -1537,6 +1901,10 @@ impl<'a, 'ctx> FnGen<'a, 'ctx> {
             }),
             Operand::Const(Const::Bool(_)) => Some(Ty::Bool),
             Operand::Const(Const::Char(_)) => Some(Ty::Char),
+            // A `math` constant is an f64 immediate.
+            Operand::Const(Const::Fn(n)) if math_const(n).is_some() => {
+                Some(Ty::Float(FloatKind::F64))
+            }
             _ => None,
         }
     }
@@ -1782,14 +2150,28 @@ mod tests {
 
     #[test]
     fn out_of_scope_function_is_skipped_not_miscompiled() {
-        // A `str`-returning function is still beyond scalar codegen (Phase 5.4+),
-        // so it must be reported skipped rather than mis-translated.
+        // A `&mut` reference parameter is still beyond scope (Phase 6.3), so the
+        // function must be reported skipped rather than mis-translated. (`str` is
+        // now supported as of 6.1, so it is no longer the example here.)
+        let ctx = Context::create();
+        let (mir, oracle) =
+            lower_to_mir("fn bump(x: &mut i32) { *x = *x + 1 }\nfn main() {}");
+        let (_module, skipped) = build_program_module(&ctx, &mir, &oracle).expect("build module");
+        assert!(
+            skipped.iter().any(|(sym, _)| sym == "bump"),
+            "ref-taking fn `bump` reported skipped: {skipped:?}"
+        );
+    }
+
+    #[test]
+    fn str_returning_function_is_supported() {
+        // Phase 6.1: a `str`-returning function is now compilable (not skipped).
         let ctx = Context::create();
         let (mir, oracle) = lower_to_mir("fn s() -> str { \"hi\" }\nfn main() {}");
         let (_module, skipped) = build_program_module(&ctx, &mir, &oracle).expect("build module");
         assert!(
-            skipped.iter().any(|(sym, _)| sym == "s"),
-            "str-returning fn `s` reported skipped: {skipped:?}"
+            !skipped.iter().any(|(sym, _)| sym == "s"),
+            "str-returning fn `s` should be supported now: {skipped:?}"
         );
     }
 
