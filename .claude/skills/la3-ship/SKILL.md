@@ -10,6 +10,14 @@ o comando e visto a saída.** Sem "deve passar", sem "provavelmente está ok".
 
 ## Sequência obrigatória (na ordem)
 
+### 0. Formatar (sempre)
+```sh
+cargo fmt --all
+```
+- Rode **sempre**, antes do build, para manter o código organizado e o diff limpo.
+- Depois confirme que não sobrou nada fora de padrão: `cargo fmt --all -- --check`
+  tem que sair limpo (exit 0).
+
 ### 1. Build limpo
 ```sh
 cargo build --workspace

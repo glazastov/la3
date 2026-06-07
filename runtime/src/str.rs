@@ -151,8 +151,16 @@ pub unsafe extern "C" fn la3_str_eq(a: *const La3Str, b: *const La3Str) -> bool 
 /// `a` and `b` must each be null or point at a live [`La3Str`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn la3_str_concat(a: *const La3Str, b: *const La3Str) -> La3Str {
-    let av = if a.is_null() { &[][..] } else { unsafe { (*a).as_bytes() } };
-    let bv = if b.is_null() { &[][..] } else { unsafe { (*b).as_bytes() } };
+    let av = if a.is_null() {
+        &[][..]
+    } else {
+        unsafe { (*a).as_bytes() }
+    };
+    let bv = if b.is_null() {
+        &[][..]
+    } else {
+        unsafe { (*b).as_bytes() }
+    };
     if av.is_empty() && bv.is_empty() {
         return La3Str::empty();
     }

@@ -196,6 +196,31 @@ impl TypeChecker {
             }
         }
 
+        // `Enum.Variant(args)` tuple-variant construction. The parser produces a
+        // method call (`recv = Enum`, `method = Variant`); type it as the enum and
+        // pin the payload literals against the variant's declared field types.
+        if let ExprKind::Ident(tyname) = &recv.kind {
+            if self.lookup(tyname).is_none() {
+                if let Some(info) = self.enums.get(tyname) {
+                    if let Some(v) = info.variants.iter().find(|v| v.name == method) {
+                        let field_tys: Vec<Ty> = match &v.kind {
+                            VariantKind::Tuple(tys) => {
+                                tys.iter().map(|t| self.resolve(t)).collect()
+                            }
+                            _ => vec![],
+                        };
+                        for (i, a) in args.iter().enumerate() {
+                            self.infer(a);
+                            if let Some(ft) = field_tys.get(i) {
+                                self.pin_literals(a, ft);
+                            }
+                        }
+                        return Ty::Enum(tyname.clone(), vec![]);
+                    }
+                }
+            }
+        }
+
         let rty = self.infer(recv);
         let base = if optional {
             rty.strip_nil()

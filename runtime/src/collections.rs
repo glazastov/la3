@@ -75,7 +75,10 @@ impl Raw {
                 realloc(self.ptr, self.layout(self.cap), self.stride * new_cap)
             }
         };
-        assert!(!new_ptr.is_null(), "la3 runtime: collection allocation failed");
+        assert!(
+            !new_ptr.is_null(),
+            "la3 runtime: collection allocation failed"
+        );
         self.ptr = new_ptr;
         self.cap = new_cap;
     }
@@ -475,7 +478,11 @@ mod tests {
         let b: u64 = 8;
         assert!(!unsafe { la3_set_contains(&s, &b as *const u64 as *const u8) });
         unsafe { la3_set_drop(&mut s) };
-        assert_eq!(DROPS.load(Ordering::SeqCst), 2, "stored element dropped at the end");
+        assert_eq!(
+            DROPS.load(Ordering::SeqCst),
+            2,
+            "stored element dropped at the end"
+        );
     }
 
     #[test]
@@ -484,15 +491,29 @@ mod tests {
         let (k1, v1): (i32, i32) = (1, 100);
         let (k2, v2): (i32, i32) = (2, 200);
         unsafe {
-            la3_map_insert(&mut m, &k1 as *const _ as *const u8, &v1 as *const _ as *const u8);
-            la3_map_insert(&mut m, &k2 as *const _ as *const u8, &v2 as *const _ as *const u8);
+            la3_map_insert(
+                &mut m,
+                &k1 as *const _ as *const u8,
+                &v1 as *const _ as *const u8,
+            );
+            la3_map_insert(
+                &mut m,
+                &k2 as *const _ as *const u8,
+                &v2 as *const _ as *const u8,
+            );
         }
         assert_eq!(unsafe { la3_map_len(&m) }, 2);
         let got = unsafe { la3_map_get(&m, &k2 as *const _ as *const u8) };
         assert_eq!(unsafe { *(got as *const i32) }, 200);
         // Update existing key — length unchanged, value replaced.
         let v2b: i32 = 222;
-        unsafe { la3_map_insert(&mut m, &k2 as *const _ as *const u8, &v2b as *const _ as *const u8) };
+        unsafe {
+            la3_map_insert(
+                &mut m,
+                &k2 as *const _ as *const u8,
+                &v2b as *const _ as *const u8,
+            )
+        };
         assert_eq!(unsafe { la3_map_len(&m) }, 2);
         let got = unsafe { la3_map_get(&m, &k2 as *const _ as *const u8) };
         assert_eq!(unsafe { *(got as *const i32) }, 222);
@@ -512,13 +533,29 @@ mod tests {
         let v1: u64 = 1;
         let v2: u64 = 2;
         unsafe {
-            la3_map_insert(&mut m, &k as *const _ as *const u8, &v1 as *const _ as *const u8);
+            la3_map_insert(
+                &mut m,
+                &k as *const _ as *const u8,
+                &v1 as *const _ as *const u8,
+            );
             // Update: the old value is dropped now.
-            la3_map_insert(&mut m, &k as *const _ as *const u8, &v2 as *const _ as *const u8);
+            la3_map_insert(
+                &mut m,
+                &k as *const _ as *const u8,
+                &v2 as *const _ as *const u8,
+            );
         }
-        assert_eq!(DROPS.load(Ordering::SeqCst), 1, "old value dropped on update");
+        assert_eq!(
+            DROPS.load(Ordering::SeqCst),
+            1,
+            "old value dropped on update"
+        );
         unsafe { la3_map_drop(&mut m) };
-        assert_eq!(DROPS.load(Ordering::SeqCst), 2, "surviving value dropped at the end");
+        assert_eq!(
+            DROPS.load(Ordering::SeqCst),
+            2,
+            "surviving value dropped at the end"
+        );
     }
 
     #[test]

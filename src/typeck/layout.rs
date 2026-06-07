@@ -380,6 +380,96 @@ impl Layouts {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Codegen layout oracle (Phase 5.4)
+// ---------------------------------------------------------------------------
+//
+// The back-end lays aggregates out by value exactly as this module computes, so
+// codegen queries the same machinery rather than re-deriving offsets. Unlike the
+// `la3 layout` dump (which stringifies field types), this returns resolved `Ty`s
+// with byte offsets, which is what the LLVM lowering needs.
+
+/// Resolved tagged-union layout of an enum for codegen. (Whole-enum size/align
+/// come from [`LayoutOracle::size_align`].)
+pub struct EnumInfo {
+    pub tag_size: u64,
+    pub payload_offset: u64,
+    /// Per variant, its payload fields as `(offset within the payload, type)`.
+    pub variants: Vec<Vec<(u64, Ty)>>,
+}
+
+/// A view over a type-checked program that answers the by-value layout questions
+/// codegen asks (sizes, field offsets, enum tag/payload geometry).
+pub struct LayoutOracle {
+    tc: TypeChecker,
+}
+
+/// Build the layout oracle by running the type checker's collection pass.
+/// (Reached from the back-end, which `main` wires in from Phase 5.5/11.)
+#[allow(dead_code)]
+pub fn layout_oracle(prog: &Program) -> LayoutOracle {
+    let mut tc = TypeChecker::new(prog);
+    tc.run(prog);
+    LayoutOracle { tc }
+}
+
+impl LayoutOracle {
+    /// Size and alignment in bytes (`None` for unsized/unknown).
+    pub fn size_align(&self, ty: &Ty) -> Option<(u64, u64)> {
+        self.tc.size_align(ty)
+    }
+
+    /// `(offset, type)` for each field of a tuple or struct, in order.
+    pub fn agg_fields(&self, ty: &Ty) -> Option<Vec<(u64, Ty)>> {
+        let tys: Vec<Ty> = match ty {
+            Ty::Tuple(ts) => ts.clone(),
+            Ty::Struct(name, args) => self
+                .tc
+                .struct_fields_resolved(name, args)?
+                .into_iter()
+                .map(|(_, t)| t)
+                .collect(),
+            _ => return None,
+        };
+        let (offsets, _, _) = self.tc.aggregate_sa(&tys)?;
+        Some(offsets.into_iter().zip(tys).collect())
+    }
+
+    /// The discriminant index of a (non-generic) enum's variant by name.
+    pub fn variant_index(&self, enum_name: &str, variant: &str) -> Option<usize> {
+        self.tc
+            .enum_variants_resolved(enum_name, &[])?
+            .iter()
+            .position(|(n, _)| n == variant)
+    }
+
+    /// Full tagged-union geometry of an enum.
+    pub fn enum_info(&self, ty: &Ty) -> Option<EnumInfo> {
+        let (name, args) = match ty {
+            Ty::Enum(n, a) => (n, a),
+            _ => return None,
+        };
+        let info = self.tc.enum_layout_info(name, args)?;
+        let resolved = self.tc.enum_variants_resolved(name, args)?;
+        let variants = resolved
+            .into_iter()
+            .zip(info.var_offsets.iter())
+            .map(|((_, payload), offs)| {
+                payload
+                    .into_iter()
+                    .zip(offs.iter().cloned())
+                    .map(|((_, t), o)| (o, t))
+                    .collect()
+            })
+            .collect();
+        Some(EnumInfo {
+            tag_size: info.tag_size,
+            payload_offset: info.payload_offset,
+            variants,
+        })
+    }
+}
+
 /// Compute the by-value layout of every concrete struct and enum in `prog`.
 /// Generic declarations are skipped (no single layout before monomorphization).
 pub fn dump_layouts(prog: &Program) -> Layouts {
